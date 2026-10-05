@@ -1,5 +1,12 @@
 # PLANCK ([Nexus link](https://www.nexusmods.com/skyrimspecialedition/mods/66025))
 
+## Proposed cooperation with VRIK HIGGS and PLANCK
+
+This fork's intended architectural direction is described in
+[the PLANCK synergy requirements](docs/trinity-synergy.md), with a link to the
+full concept maintained in Body Pouches. These are proposed services, not a
+released API or an agreement with the framework authors.
+
 This mod is also complicated.
 
 To build from source, it requires object definitions / headers similar to those belonging to havok 2010.2. I will not be providing these, nor do I claim to have them myself.
