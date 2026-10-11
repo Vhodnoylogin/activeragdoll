@@ -1,58 +1,25 @@
 # PLANCK architecture for VRIK HIGGS and PLANCK synergy
 
-The proposed synergy gives Skyrim VR mods a shared foundation with clear owners:
-VRIK provides the player body, spatial hand interpretation and generic zones/slots;
-HIGGS brokers controller input and owns physical hand/item interactions; PLANCK
-owns NPC physical animation, ragdoll lifetime and its physical-hit processing.
-Consumers retain their gameplay and request services from those owners.
+The proposed synergy gives Skyrim VR mods a shared foundation with clear owners. HIGGS brokers grip/trigger input and owns physical hand/item interactions. VRIK interprets hand position, maps anchors onto the actual player body/equipment, handles spatial interactions and renders. PLANCK owns NPC physical animation, ragdoll lifetime and physical-hit processing. Consumers keep their gameplay, inventory-selection and equipment-proxy rules.
 
-The single source of the full concept, including illustrative pseudo-ABI, is
-[the English concept in Body Pouches](https://github.com/Vhodnoylogin/body-pouches/blob/main/docs/trinity-synergy/concept-en.md).
-[The Russian version](https://github.com/Vhodnoylogin/body-pouches/blob/main/docs/trinity-synergy/concept-ru.md)
-is maintained in the same directory. Body Pouches intends to adopt this
-architecture. The services below are proposed changes, not an available SDK or
-an agreement with the framework authors.
+A separate slot service, **Body Slots** as a working name, owns slot creation, stable definitions/instances, local placement and access geometry, generic allowed-content policies and saved customization. Its main workflow is an offline visual editor on a reference body/skeleton/equipment model → editable project and versioned declarative package → slot runtime/API → VRIK binding, hand detection, interaction and presentation. Authoring/export requires neither Skyrim nor VRIK. Keeping the native 14 holsters is an optional compatibility path. The editor and new services are proposals, not implemented features.
+
+The only maintained source of the full concept and illustrative pseudo-ABI is [the English concept in Body Pouches](https://github.com/Vhodnoylogin/body-pouches/blob/main/docs/trinity-synergy/concept-en.md), with [a Russian counterpart](https://github.com/Vhodnoylogin/body-pouches/blob/main/docs/trinity-synergy/concept-ru.md). This file records PLANCK-specific requirements, not another copy of the concept. Body Pouches intends to adopt the architecture; it is not an available SDK or an agreement with the framework authors.
 
 ## Required architectural changes in PLANCK
 
-1. **Expose NPC physics through copied state and validated endpoints.** Provide
-   actor, bone and body metadata, coordinate spaces and generations. An attachment
-   request returns an endpoint with a defined lifetime, rather than encouraging
-   consumers to retain private ragdoll pointers. Ragdoll replacement, actor unload,
-   world replacement and game load invalidate dependent endpoints and constraints.
+1. **Expose copied NPC state and validated endpoints.** Provide actor, bone and body metadata, coordinate spaces and generations. Attachment requests return endpoints with a declared lifetime rather than private ragdoll pointers. Ragdoll replacement, actor unload, world replacement and game load invalidate dependent endpoints and constraints.
 
-2. **Separate physical-hit candidates from committed outcomes.** Offer a bounded,
-   documented policy stage before PLANCK commits the relevant hit, followed by
-   immutable result events. An observed candidate is not permission to change
-   damage afterward. Define scope, conflict resolution and user priorities where
-   alternative policies are selectable; process a physical hit once.
+2. **Separate hit candidates from committed outcomes.** Offer a bounded policy stage before the relevant physical-hit commitment, followed by immutable results. Observing a candidate does not permit changing damage afterward. Define scope, conflict resolution and visible user priorities where alternatives are selectable; process each physical hit once.
 
-3. **Replace per-mod global tuning with scoped interaction policies.** Give a
-   registered consumer a policy for its declared actor, weapon or interaction and
-   an owned lease for temporary effects. Weight, parry and penetration providers
-   keep their gameplay rules. They should not need to change global thresholds
-   for unrelated weapons or restore another consumer's settings.
+3. **Replace global tuning with scoped policies.** Registered consumers request policies for their declared actor, weapon or interaction and owned leases for temporary effects. Weight, parry and penetration consumers keep their gameplay rules instead of changing unrelated weapons' thresholds or restoring another mod's settings.
 
-4. **Use HIGGS services for player-hand ownership and physical requests.** Migrate
-   temporary hand restrictions to owned HIGGS suppression leases and use explicit
-   release requests when possession must end. Wait for confirmed results before
-   dependent operations. PLANCK drives NPC physical animation; HIGGS remains the
-   final actuator for its player hand/weapon bodies. A penetration mod decides
-   wound and extraction rules, PLANCK validates the NPC endpoint, and HIGGS applies
-   the corresponding weapon constraint.
+4. **Use HIGGS for player-hand ownership and physical requests.** Migrate temporary hand restrictions to owned suppression leases; request explicit release when possession must end and await confirmed results. PLANCK drives NPC animation; HIGGS remains the final actuator for its player hand/weapon bodies. A penetration consumer decides wound/extraction rules, PLANCK validates the NPC endpoint and HIGGS applies the weapon constraint.
 
-5. **Make lifecycle and safe phases part of the ABI.** Keep interface 001 and its
-   existing hit-event contract unchanged. Negotiate additive capabilities with
-   copied, size-tagged records, request/executor identities, epochs and explicit
-   callback lifetimes. Support removal with confirmed drainage and queue mutations
-   for their legal physics phase. Do not serialize live endpoint or lease handles.
+5. **Keep slot authoring and body-slot interaction outside PLANCK.** Body Slots owns definitions, generic eligibility and customization; VRIK owns actual body binding, hand detection and slot presentation. Taking an item from a slot uses VRIK/content-executor and HIGGS contracts; PLANCK participates when the resulting action interacts with NPC physics or its hit processing. It does not become a slot registry, inventory/equip executor or required provider for an offline editor, potion pouch, generic harvest or climb.
 
-The current [001 interface](../include/planckinterface001.h),
-[API implementation](../src/pluginapi.cpp) and [main runtime](../src/main.cpp)
-provide the existing hit data, settings and HIGGS hand calls. They are starting
-points for this refactoring. Internal bug repairs and stability work remain
-separate source/build/runtime checks, not evidence that the new ABI exists.
+6. **Make lifecycle and safe phases part of the ABI.** Keep interface 001 and its hit-event contract unchanged. Negotiate additive capabilities with copied size-tagged records, request/executor identities, epochs and explicit callback lifetimes. Support removal with confirmed drainage and queue mutations at their legal phase. Slot binding generation, physical possession and NPC endpoint generation are distinct; never serialize live endpoint or lease handles.
 
-Reuse CommonLib for verified actor, scene, locking and Havok operations. NPC policy
-and endpoint ownership remain PLANCK runtime services. Generic harvesting and
-climbing do not require PLANCK unless they actually interact with its NPC domain.
+The current [001 interface](../include/planckinterface001.h), [API implementation](../src/pluginapi.cpp) and [main runtime](../src/main.cpp) are refactoring starting points. Internal bug repairs and stability checks do not establish that the proposed ABI exists.
+
+CommonLib is the second synergy level: reuse its current actor, scene, locking and Havok primitives, and move address handling and repeated technical operations into verified library methods. NPC policy, endpoints and hit commitment remain PLANCK runtime services; common engine code does not take over those decisions.

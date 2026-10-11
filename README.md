@@ -2,10 +2,7 @@
 
 ## Proposed cooperation with VRIK HIGGS and PLANCK
 
-This fork's intended architectural direction is described in
-[the PLANCK synergy requirements](docs/trinity-synergy.md), with a link to the
-full concept maintained in Body Pouches. These are proposed services, not a
-released API or an agreement with the framework authors.
+This fork's intended architectural direction is described in [the PLANCK synergy requirements](docs/trinity-synergy.md), linked to the full concept maintained only in Body Pouches. PLANCK owns NPC physics and hits; a separate slot service owns offline authoring and saved definitions, while VRIK handles their runtime binding and interactions. These are proposed services, not a released API or an agreement with the framework authors.
 
 This mod is also complicated.
 
