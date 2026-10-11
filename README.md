@@ -8,6 +8,8 @@
 
 This fork's intended architectural direction is described in [the PLANCK synergy requirements](docs/trinity-synergy.md), linked to the full concept maintained only in Body Pouches. PLANCK owns NPC physics and hits; a separate slot service owns offline authoring and saved definitions, while VRIK handles their runtime binding and interactions. These are proposed services, not a released API or an agreement with the framework authors.
 
+The [native build prerequisites](docs/native-build-prerequisites.md) distinguish the available SKSE/toolchain from nonportable project paths and the remaining compatible Havok headers.
+
 This mod is also complicated.
 
 The development branch includes bounded lifecycle repairs for temporary NPC
