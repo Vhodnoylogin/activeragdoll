@@ -10,6 +10,12 @@ This fork's intended architectural direction is described in [the PLANCK synergy
 
 This mod is also complicated.
 
+The development branch includes bounded lifecycle repairs for temporary NPC
+movement/look-at restrictions and nested hit-event context. Run their source-backed
+standalone checks with `python tests/run_lifecycle_regressions.py --build-dir <external-directory>`.
+The [regression fixture](tests/README.md) uses a fake engine; the native plugin
+remains unbuilt and untested in game, and the proposed endpoint ABI is not implemented.
+
 To build from source, it requires object definitions / headers similar to those belonging to havok 2010.2. I will not be providing these, nor do I claim to have them myself.
 
 

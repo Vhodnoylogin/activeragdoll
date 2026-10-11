@@ -1,0 +1,190 @@
+// Fake engine fixture. Production functions are inserted unchanged by the runner.
+// It qualifies their C++ control flow and lock use, not the native engine layout.
+#include <atomic>
+#include <cstdint>
+#include <functional>
+#include <iostream>
+#include <mutex>
+#include <stdexcept>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
+
+using UInt32 = std::uint32_t;
+using UInt16 = std::uint16_t;
+struct Actor {};
+
+void Check(bool condition, const char* message) {
+    if (!condition) throw std::runtime_error(message);
+}
+
+// A map operation must own the specific matching mutex in this thread. This
+// catches both missing reset locks and accidental lookup locks on another map.
+class CheckedMutex {
+public:
+    void lock() { mutex_.lock(); held_.insert(this); }
+    void unlock() { held_.erase(this); mutex_.unlock(); }
+    bool IsHeld() const { return held_.contains(this); }
+private:
+    std::mutex mutex_;
+    static inline thread_local std::unordered_set<const CheckedMutex*> held_;
+};
+
+template<class Key, class Value> class CheckedMap {
+public:
+    explicit CheckedMap(CheckedMutex& lock) : lock_(lock) {}
+    bool contains(Key key) const { RequireLock(); return values_.contains(key); }
+    bool empty() const { RequireLock(); return values_.empty(); }
+    void clear() { RequireLock(); values_.clear(); }
+    void Set(Key key, Value value) { RequireLock(); values_[key] = value; }
+private:
+    void RequireLock() const { Check(lock_.IsHeld(), "map accessed without its matching mutex"); }
+    CheckedMutex& lock_;
+    std::unordered_map<Key, Value> values_;
+};
+
+CheckedMutex g_actorMoveRestrictionsLock, g_disableLookAtActorsLock;
+CheckedMap<Actor*, double> g_actorMoveRestrictions(g_actorMoveRestrictionsLock);
+CheckedMap<Actor*, double> g_disableLookAtActors(g_disableLookAtActorsLock);
+std::mutex g_activeActorsLock, g_activeRagdollsLock, g_grabbedActorStatesLock;
+std::unordered_set<Actor*> g_activeActors;
+std::unordered_set<int> g_activeRagdolls, g_grabbedActorStates, g_npcs,
+    g_activeBipedGroups, g_noPlayerCharControllerCollideGroups, g_hittableCharControllerGroups,
+    g_selfCollidableBipedGroups, g_higgsLingeringRigidBodies, g_bumpActors, g_shoveData,
+    g_shoveAnimTimes, g_shovedActors, g_footYankedActors;
+std::unordered_set<int> g_higgsLingeringRefrs[2];
+bool g_clearUpdateManifoldObjects = false;
+struct PhysicsListener { UInt32 lastPhysicsDamageFormId = 0; } g_physicsListener;
+
+struct TESHitEvent { int target; int caster; UInt32 sourceFormID; UInt32 projectileFormID; UInt32 flags; };
+struct HitData { UInt32 flags; };
+namespace PlanckPluginAPI {
+    struct PlanckHitData { int identity = 0; };
+    struct PlanckHitEvent : TESHitEvent { void* hitData; PlanckHitData extendedHitData; };
+    constexpr UInt32 hitEventMagicNumber = 0x59914000;
+}
+struct {
+    PlanckPluginAPI::PlanckHitData lastHitData;
+    TESHitEvent* currentHitEvent = nullptr;
+} g_interface001;
+template<class Event> struct EventDispatcher {
+    std::function<void(Event*)> receiver;
+    void SendEvent(Event* event) { receiver(event); }
+};
+
+/*@MOVEMENT_LOOKUP@*/
+/*@LOOK_AT_LOOKUP@*/
+/*@RESET_OBJECTS@*/
+/*@DISPATCH_HIT@*/
+
+void Populate(Actor* actor) {
+    { std::scoped_lock lock(g_actorMoveRestrictionsLock); g_actorMoveRestrictions.Set(actor, 1000000.0); }
+    { std::scoped_lock lock(g_disableLookAtActorsLock); g_disableLookAtActors.Set(actor, 1000000.0); }
+}
+
+void ResetAndMembership() {
+    Actor first, second;
+    Check(!IsActorMovementRestricted(&first) && !IsActorLookAtDisabled(&first), "empty lookups");
+    Populate(&first);
+    Check(IsActorMovementRestricted(&first) && IsActorLookAtDisabled(&first), "live restrictions");
+    Check(!IsActorMovementRestricted(&second) && !IsActorLookAtDisabled(&second), "actor identity independent");
+    ResetObjects();
+    Check(!IsActorMovementRestricted(&first) && !IsActorLookAtDisabled(&first), "reset revokes prior restrictions");
+    Check(g_clearUpdateManifoldObjects, "existing manifold reset retained");
+    Populate(&second);
+    Check(IsActorMovementRestricted(&second) && IsActorLookAtDisabled(&second), "new state after reset works");
+    ResetObjects();
+}
+
+void ConcurrentResetAndLookup() {
+    Actor actor;
+    std::atomic<unsigned> failures{0};
+    std::thread writer([&] {
+        try { for (unsigned i = 0; i < 3000; ++i) { Populate(&actor); ResetObjects(); } }
+        catch (...) { ++failures; }
+    });
+    std::thread reader([&] {
+        try { for (unsigned i = 0; i < 6000; ++i) {
+            (void)IsActorMovementRestricted(&actor);
+            (void)IsActorLookAtDisabled(&actor);
+        } }
+        catch (...) { ++failures; }
+    });
+    writer.join(); reader.join();
+    Check(failures == 0, "concurrent reset/lookup obey matching locks");
+    Check(!IsActorMovementRestricted(&actor) && !IsActorLookAtDisabled(&actor), "last reset leaves no state");
+}
+
+void NestedDispatch(UInt32 outerFlags, UInt32 innerFlags) {
+    EventDispatcher<TESHitEvent> dispatcher;
+    TESHitEvent outer{1,1,0,0,0}, inner{2,1,0,0,0};
+    HitData outerData{outerFlags}, innerData{innerFlags};
+    bool innerSeen = false;
+    dispatcher.receiver = [&](TESHitEvent* event) {
+        Check(g_interface001.currentHitEvent == event, "current event matches synchronous dispatch");
+        if (event->target == 1) {
+            ScriptEventSourceHolder_DispatchHitEventFromHitData_DispatchHitEvent_Hook(&dispatcher, &inner, &innerData);
+            Check(g_interface001.currentHitEvent == event, "outer event restored after nested dispatch");
+        } else { innerSeen = true; }
+    };
+    ScriptEventSourceHolder_DispatchHitEventFromHitData_DispatchHitEvent_Hook(&dispatcher, &outer, &outerData);
+    Check(innerSeen && g_interface001.currentHitEvent == nullptr, "null restored after outer dispatch");
+}
+
+void ExceptionAndPriorContext() {
+    EventDispatcher<TESHitEvent> dispatcher;
+    TESHitEvent outer{1,1,0,0,0}, inner{2,1,0,0,0}, prior{3,1,0,0,0};
+    HitData extended{1u << 30}, ordinary{0};
+    bool innerThrew = false;
+    dispatcher.receiver = [&](TESHitEvent* event) {
+        Check(g_interface001.currentHitEvent == event, "exception handler current event");
+        if (event->target == 2) throw std::runtime_error("fixture sink failure");
+        try { ScriptEventSourceHolder_DispatchHitEventFromHitData_DispatchHitEvent_Hook(&dispatcher, &inner, &ordinary); }
+        catch (const std::runtime_error&) { innerThrew = true; }
+        Check(g_interface001.currentHitEvent == event, "caught nested exception restores outer");
+        throw std::runtime_error("outer fixture failure");
+    };
+    g_interface001.currentHitEvent = &prior;
+    bool outerThrew = false;
+    try { ScriptEventSourceHolder_DispatchHitEventFromHitData_DispatchHitEvent_Hook(&dispatcher, &outer, &extended); }
+    catch (const std::runtime_error&) { outerThrew = true; }
+    Check(innerThrew && outerThrew && g_interface001.currentHitEvent == &prior, "unwind restores prior context");
+    g_interface001.currentHitEvent = nullptr;
+}
+
+void EventPayloadUnchanged() {
+    EventDispatcher<TESHitEvent> dispatcher;
+    TESHitEvent event{1,2,7,9,3};
+    HitData extended{1u << 30}, physics{1u << 29};
+    g_interface001.lastHitData.identity = 1337;
+    dispatcher.receiver = [&](TESHitEvent* observed) {
+        Check(observed->target == 1 && observed->caster == 2 && observed->projectileFormID == 9, "event payload retained");
+        Check((observed->flags & 0xffffff00u) == PlanckPluginAPI::hitEventMagicNumber && (observed->flags & 0xffu) == 3,
+            "extended magic and original low flags retained");
+        auto* planck = static_cast<PlanckPluginAPI::PlanckHitEvent*>(observed);
+        Check(planck->hitData == &extended && planck->extendedHitData.identity == 1337, "extended copied data retained");
+    };
+    ScriptEventSourceHolder_DispatchHitEventFromHitData_DispatchHitEvent_Hook(&dispatcher, &event, &extended);
+    g_physicsListener.lastPhysicsDamageFormId = 42;
+    dispatcher.receiver = [&](TESHitEvent* observed) {
+        Check(observed == &event && observed->sourceFormID == 42 && observed->flags == 3, "ordinary physics behavior retained");
+        Check(g_interface001.currentHitEvent == observed, "ordinary event follows official current-event contract");
+    };
+    ScriptEventSourceHolder_DispatchHitEventFromHitData_DispatchHitEvent_Hook(&dispatcher, &event, &physics);
+    Check(g_interface001.currentHitEvent == nullptr, "ordinary dispatch restores null");
+}
+
+int main() {
+    try {
+        ResetAndMembership(); std::cout << "PASS production reset and locked membership\n";
+        ConcurrentResetAndLookup(); std::cout << "PASS concurrent reset and lookup\n";
+        NestedDispatch(1u << 30, 1u << 30);
+        NestedDispatch(1u << 30, 0);
+        NestedDispatch(0, 1u << 30);
+        NestedDispatch(0, 0);
+        std::cout << "PASS nested extended and ordinary dispatch combinations\n";
+        ExceptionAndPriorContext(); std::cout << "PASS nested exceptions and prior context restoration\n";
+        EventPayloadUnchanged(); std::cout << "PASS original extended and physics event payloads\n";
+    } catch (const std::exception& error) { std::cerr << "FAIL " << error.what() << '\n'; return 1; }
+    std::cout << "All source-backed lifecycle regressions passed (fake engine).\n";
+}

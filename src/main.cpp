@@ -2525,6 +2525,18 @@ struct LookAtDisableData
 std::unordered_map<Actor *, LookAtDisableData> g_disableLookAtActors{};
 std::mutex g_disableLookAtActorsLock{};
 
+bool IsActorMovementRestricted(Actor *actor)
+{
+    std::scoped_lock lock(g_actorMoveRestrictionsLock);
+    return g_actorMoveRestrictions.contains(actor);
+}
+
+bool IsActorLookAtDisabled(Actor *actor)
+{
+    std::scoped_lock lock(g_disableLookAtActorsLock);
+    return g_disableLookAtActors.contains(actor);
+}
+
 struct CollidedActorData
 {
     float mostPenetrationDistance;
@@ -4063,6 +4075,16 @@ void ResetObjects()
     {
         std::scoped_lock lock(g_activeRagdollsLock);
         g_activeRagdolls.clear();
+    }
+
+    {
+        std::scoped_lock lock(g_actorMoveRestrictionsLock);
+        g_actorMoveRestrictions.clear();
+    }
+
+    {
+        std::scoped_lock lock(g_disableLookAtActorsLock);
+        g_disableLookAtActors.clear();
     }
 
     g_npcs.clear();
@@ -5931,6 +5953,18 @@ void Character_HitTarget_HitData_Populate_Hook(HitData *hitData, Actor *srcRefr,
 
 void ScriptEventSourceHolder_DispatchHitEventFromHitData_DispatchHitEvent_Hook(EventDispatcher<TESHitEvent> *dispatcher, TESHitEvent *hitEvent, HitData *hitData)
 {
+    // Event handlers can synchronously dispatch another hit. Restore the outer
+    // event on return or exception instead of clearing its still-live context.
+    struct CurrentHitEventScope {
+        explicit CurrentHitEventScope(TESHitEvent *event) : previous(g_interface001.currentHitEvent) {
+            g_interface001.currentHitEvent = event;
+        }
+        ~CurrentHitEventScope() { g_interface001.currentHitEvent = previous; }
+        CurrentHitEventScope(const CurrentHitEventScope &) = delete;
+        CurrentHitEventScope &operator=(const CurrentHitEventScope &) = delete;
+        TESHitEvent *previous;
+    };
+
     if (hitData->flags >> 30 & 1) {
 #ifdef _DEBUG
         _MESSAGE("%d Dispatch hit", *g_currentFrameCounter);
@@ -5942,9 +5976,8 @@ void ScriptEventSourceHolder_DispatchHitEventFromHitData_DispatchHitEvent_Hook(E
         extendedHitEvent.flags &= ~(0xFFFFFF00); // zero out top 3 bytes
         extendedHitEvent.flags |= PlanckPluginAPI::hitEventMagicNumber; // hopefully this never occurs randomly...
 
-        g_interface001.currentHitEvent = &extendedHitEvent;
+        CurrentHitEventScope currentEvent(&extendedHitEvent);
         dispatcher->SendEvent(&extendedHitEvent);
-        g_interface001.currentHitEvent = nullptr;
     }
     else {
         if (hitData->flags >> 29 & 1) {
@@ -5952,6 +5985,7 @@ void ScriptEventSourceHolder_DispatchHitEventFromHitData_DispatchHitEvent_Hook(E
             hitEvent->sourceFormID = g_physicsListener.lastPhysicsDamageFormId;
         }
 
+        CurrentHitEventScope currentEvent(hitEvent);
         dispatcher->SendEvent(hitEvent);
     }
 }
@@ -6287,32 +6321,25 @@ void Character_ModifyMovementData_Hook(Actor *actor, float a_deltaTime, NiPoint3
     g_Character_ModifyMovementData_Original(actor, a_deltaTime, a_moveAmt, a_rotAmt);
 
     if (!IsDoingGrabbedActorMovement(actor)) {
-        if (!g_actorMoveRestrictions.empty()) {
-            bool isRestricted = false;
-            {
-                std::scoped_lock lock(g_actorMoveRestrictionsLock);
-                isRestricted = g_actorMoveRestrictions.contains(actor);
-            }
-            if (isRestricted) {
-                NiPoint3 direction = VectorNormalized((*g_thePlayer)->pos - actor->pos);
+        if (IsActorMovementRestricted(actor)) {
+            NiPoint3 direction = VectorNormalized((*g_thePlayer)->pos - actor->pos);
 
-                NiTransform refrTransform; TESObjectREFR_GetTransformIncorporatingScale(actor, refrTransform);
-                NiPoint3 directionInActorSpace = refrTransform.rot.Transpose() * direction;
+            NiTransform refrTransform; TESObjectREFR_GetTransformIncorporatingScale(actor, refrTransform);
+            NiPoint3 directionInActorSpace = refrTransform.rot.Transpose() * direction;
 
-                { // moveAmt is in actor space
-                    float dot = DotProduct(a_moveAmt, directionInActorSpace);
-                    if (dot > 0.f) {
-                        a_moveAmt = a_moveAmt - directionInActorSpace * dot;
-                    }
+            { // moveAmt is in actor space
+                float dot = DotProduct(a_moveAmt, directionInActorSpace);
+                if (dot > 0.f) {
+                    a_moveAmt = a_moveAmt - directionInActorSpace * dot;
                 }
+            }
 
-                // outVelocity is in world space
-                if (bhkCharacterController *controller = GetCharacterController(actor)) {
-                    NiPoint3 controllerVelocity = HkVectorToNiPoint(controller->outVelocity);
-                    float dot = DotProduct(controllerVelocity, direction);
-                    if (dot > 0.f) {
-                        controller->outVelocity = NiPointToHkVector(controllerVelocity - direction * dot);
-                    }
+            // outVelocity is in world space
+            if (bhkCharacterController *controller = GetCharacterController(actor)) {
+                NiPoint3 controllerVelocity = HkVectorToNiPoint(controller->outVelocity);
+                float dot = DotProduct(controllerVelocity, direction);
+                if (dot > 0.f) {
+                    controller->outVelocity = NiPointToHkVector(controllerVelocity - direction * dot);
                 }
             }
         }
@@ -7291,16 +7318,9 @@ void BSLookAtModifier_modify_Hook(BSLookAtModifier *_this, const hkbContext &con
 
     bool disabledLookAt = false;
     if (_this->lookAtTarget) {
-        if (!g_disableLookAtActors.empty()) {
-            bool shouldDisable = false;
-            {
-                std::scoped_lock lock(g_disableLookAtActorsLock);
-                shouldDisable = g_disableLookAtActors.contains(actor);
-            }
-            if (shouldDisable) {
-                _this->lookAtTarget = false;
-                disabledLookAt = true;
-            }
+        if (IsActorLookAtDisabled(actor)) {
+            _this->lookAtTarget = false;
+            disabledLookAt = true;
         }
     }
 
