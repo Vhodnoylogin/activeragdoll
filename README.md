@@ -1,5 +1,9 @@
 # PLANCK ([Nexus link](https://www.nexusmods.com/skyrimspecialedition/mods/66025))
 
+## Cooperation development
+
+`main` preserves the upstream source; `development` contains the consolidated fork work and [PLANCK-specific synergy requirements](docs/trinity-synergy.md). The only maintained full concept and implementation ledger are in [Body Pouches](https://github.com/Vhodnoylogin/body-pouches/tree/main/docs/trinity-synergy). PLANCK owns NPC physics and hit processing; HIGGS owns hand/item physics and input, VRIK owns body interpretation and runtime slot interaction, and Body Slots owns declarative slot configuration.
+
 ## Proposed cooperation with VRIK HIGGS and PLANCK
 
 This fork's intended architectural direction is described in [the PLANCK synergy requirements](docs/trinity-synergy.md), linked to the full concept maintained only in Body Pouches. PLANCK owns NPC physics and hits; a separate slot service owns offline authoring and saved definitions, while VRIK handles their runtime binding and interactions. These are proposed services, not a released API or an agreement with the framework authors.
