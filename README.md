@@ -18,6 +18,11 @@ standalone checks with `python tests/run_lifecycle_regressions.py --build-dir <e
 The [regression fixture](tests/README.md) uses a fake engine; the native plugin
 remains unbuilt and untested in game, and the proposed endpoint ABI is not implemented.
 
+A private [reset-only deferred cleanup fence](docs/deferred-cleanup.md) also prevents
+queued furniture/get-up collision cleanup from adopting a replacement graph after
+reset. Its actual-source CPU fixture is `tests/run_cleanup_epoch_tests.py`; it adds
+no actor endpoint or complete physics-lifetime guarantee.
+
 To build from source, it requires object definitions / headers similar to those belonging to havok 2010.2. I will not be providing these, nor do I claim to have them myself.
 
 

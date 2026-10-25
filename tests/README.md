@@ -28,3 +28,9 @@ the same exception model. This is not a whole-plugin exception guarantee.
 The native plugin still needs its external SKSE and Havok dependencies and separate
 game qualification. The fixture does not check native layouts, hook addresses,
 event scheduling or Havok cleanup and does not install or launch the game.
+
+The separate reset-only deferred cleanup fixture runs with
+`python tests/run_cleanup_epoch_tests.py --build-dir <new external directory>`.
+It executes all three production enqueue hooks, the delayed queue, cleanup task
+and reset, including already-queued work and separate stale-run/recaptured-ticket
+negative controls. See [its bounded contract](../docs/deferred-cleanup.md).

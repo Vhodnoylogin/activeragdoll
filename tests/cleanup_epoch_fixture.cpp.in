@@ -1,0 +1,154 @@
+// Selected production bodies below; engine/task interfaces are explicit doubles.
+#include <atomic>
+#include <cstdint>
+#include <functional>
+#include <iostream>
+#include <memory>
+#include <mutex>
+#include <shared_mutex>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+#include <limits>
+#define private public
+#include "cleanup_epoch.h"
+#undef private
+using UInt32=std::uint32_t;
+using UInt64=std::uint64_t;
+unsigned checks=0;
+void Check(bool value,const char* message){++checks;if(!value)throw std::runtime_error(message);}
+bool requireResetFence=false;
+PlanckCleanup::Ticket priorResetTicket;
+template<class T> struct ResetAwareSet:std::unordered_set<T>{
+    void clear(){if(requireResetFence)Check(!PlanckCleanup::IsCurrent(priorResetTicket),"epoch invalidation must precede old-state clear");std::unordered_set<T>::clear();}
+};
+struct BSAnimationGraphManager {int cleanupCalls=0;};
+struct TESObjectREFR {virtual ~TESObjectREFR()=default;};
+struct Actor:TESObjectREFR {BSAnimationGraphManager* manager=nullptr;};
+struct NiAVObject {TESObjectREFR* owner=nullptr;};
+struct BSTaskPool {};
+template<class T>struct NiPointer {T* ptr=nullptr;operator T*()const{return ptr;}};
+struct BSAnimationGraphManagerPtr {BSAnimationGraphManager* ptr=nullptr;};
+unsigned lookups=0,managerLookups=0,engineCalls=0,fallbackCalls=0;
+std::unordered_map<UInt32,TESObjectREFR*> references;
+bool LookupREFRByHandle(UInt32 handle,NiPointer<TESObjectREFR>& output){++lookups;auto i=references.find(handle);if(i==references.end())return false;output.ptr=i->second;return output.ptr!=nullptr;}
+bool GetAnimationGraphManager(Actor* actor,BSAnimationGraphManagerPtr& output){++managerLookups;output.ptr=actor->manager;return output.ptr!=nullptr;}
+#define DYNAMIC_CAST(value,from,to) dynamic_cast<to*>(static_cast<from*>(value))
+void BSAnimationGraphManager_RemoveNonRagdollRigidBodiesFromWorld(BSAnimationGraphManager* manager,bool*){
+    // Reenter numeric owner: no epoch lock may be held across this engine boundary.
+    Check(PlanckCleanup::Capture().generation!=0,"valid cleanup must release owner lock before engine work");
+    ++engineCalls;++manager->cleanupCalls;
+}
+struct TaskDelegate {virtual ~TaskDelegate()=default;virtual void Run()=0;virtual void Dispose()=0;};
+struct TaskInterface {
+    std::vector<TaskDelegate*> queue;
+    void AddTask(TaskDelegate* task){Check(task!=nullptr,"task allocation failed");queue.push_back(task);}
+    void Drain(){auto tasks=std::move(queue);queue.clear();for(auto* task:tasks){task->Run();task->Dispose();}}
+} taskInterface;
+TaskInterface* g_taskInterface=&taskInterface;
+TESObjectREFR* NiAVObject_GetOwner(NiAVObject* root){return root?root->owner:nullptr;}
+UInt32 GetOrCreateRefrHandle(TESObjectREFR* reference){references[7]=reference;return 7;}
+void BSTaskPool_QueueRemoveCollisionFromWorld(BSTaskPool*,NiAVObject*){++fallbackCalls;}
+void BSAnimationGraphManager_SetWorld(BSAnimationGraphManager*,UInt64*){++fallbackCalls;}
+using _BSTaskPool_QueueRemoveCollisionFromWorld=void(*)(BSTaskPool*,NiAVObject*);
+_BSTaskPool_QueueRemoveCollisionFromWorld GetUpEndHandler_Handle_RemoveCollision_BSTaskPool_QueueRemoveCollisionFromWorld_Original=BSTaskPool_QueueRemoveCollisionFromWorld;
+double g_currentFrameTime=10;
+std::shared_mutex g_activeActorsLock;
+std::mutex g_activeRagdollsLock,g_grabbedActorStatesLock,g_actorMoveRestrictionsLock,g_disableLookAtActorsLock;
+ResetAwareSet<Actor*> g_activeActors;
+std::unordered_set<int> g_activeRagdolls,g_grabbedActorStates,g_actorMoveRestrictions,g_disableLookAtActors,g_npcs,
+    g_activeBipedGroups,g_noPlayerCharControllerCollideGroups,g_hittableCharControllerGroups,g_selfCollidableBipedGroups,
+    g_higgsLingeringRigidBodies,g_bumpActors,g_shoveData,g_shoveAnimTimes,g_shovedActors,g_footYankedActors;
+std::unordered_set<int> g_higgsLingeringRefrs[2];
+struct PhysicsListener {} g_physicsListener;
+bool g_clearUpdateManifoldObjects=false;
+std::function<void()> activeQueryHook;
+struct ActiveQueryBoundary {
+    // Declared before the actual lookup's shared lock, so it runs after unlock
+    // and after the return value was computed, before the caller continues.
+    ~ActiveQueryBoundary() noexcept(false){auto hook=std::move(activeQueryHook);if(hook)hook();}
+};
+/*@ACTIVE_LOOKUP@*/
+/*@GENERIC_JOB@*/;
+/*@DELAYED_JOB@*/;
+std::vector<std::unique_ptr<DelayedJob>> g_delayedJobs;
+std::mutex g_delayedJobsLock;
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable:4018) // Existing signed delayed-job loop index is retained verbatim.
+#endif
+/*@QUEUE_DELAYED@*/
+/*@RUN_DELAYED@*/
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+/*@RESET_OBJECTS@*/
+/*@CLEANUP_TASK@*/;
+/*@EXIT_HOOK@*/
+/*@ENTER_HOOK@*/
+/*@GETUP_HOOK@*/
+
+void ResetAndRebind(Actor& actor,BSAnimationGraphManager& manager){
+    priorResetTicket=PlanckCleanup::Capture();requireResetFence=true;ResetObjects();requireResetFence=false;
+    actor.manager=&manager;g_activeActors.insert(&actor);references[7]=&actor;
+}
+void QueuePath(int path,Actor& actor,NiAVObject& root,BSTaskPool& pool){
+    if(path==0)ActorProcess_ExitFurniture_RemoveCollision_Hook(&pool,&root);
+    else if(path==1)GetUpEndHandler_Handle_RemoveCollision_Hook(&pool,&root);
+    else ActorProcess_EnterFurniture_SetWorld_Hook(actor.manager,nullptr,&actor);
+}
+int main(){try{
+    Actor actor;BSAnimationGraphManager first,replacement;actor.manager=&first;NiAVObject root{&actor};BSTaskPool pool;
+    g_activeActors.insert(&actor);
+    for(int path=0;path<3;++path){
+        QueuePath(path,actor,root,pool);
+        if(path==2){Check(taskInterface.queue.empty()&&g_delayedJobs.size()==1,"entry must retain delayed scheduling");RunDelayedJobs(10.09);Check(taskInterface.queue.empty(),"entry cleanup ran too early");RunDelayedJobs(10.11);}
+        Check(taskInterface.queue.size()==1,"all enqueue paths must create one cleanup");
+        taskInterface.Drain();Check(first.cleanupCalls==path+1,"valid path must preserve original engine cleanup");
+    }
+    Check(fallbackCalls==0,"active paths must not add original fallback calls");
+    for(int path=0;path<3;++path){
+        actor.manager=&first;g_activeActors.insert(&actor);QueuePath(path,actor,root,pool);
+        const auto beforeLookups=lookups,beforeCalls=engineCalls;
+        ResetAndRebind(actor,replacement);
+        if(path==2)RunDelayedJobs(11);
+        taskInterface.Drain();
+        Check(lookups==beforeLookups,path==2?"old delayed cleanup adopted new reset scope":"stale queued cleanup reached handle lookup");
+        Check(engineCalls==beforeCalls,"stale cleanup touched replacement manager");
+        QueuePath(path,actor,root,pool);if(path==2)RunDelayedJobs(11);taskInterface.Drain();
+        Check(engineCalls==beforeCalls+1,"new ticket after reset must still execute");
+    }
+    // Entry's delayed lambda may already have submitted its task when reset occurs.
+    QueuePath(2,actor,root,pool);RunDelayedJobs(11);Check(taskInterface.queue.size()==1,"entry task was not submitted");
+    const auto queuedLookups=lookups;ResetAndRebind(actor,replacement);taskInterface.Drain();Check(lookups==queuedLookups,"already-queued entry task escaped reset fence");
+    for(int path=0;path<3;++path){
+        actor.manager=&first;g_activeActors.insert(&actor);
+        const auto beforeLookups=lookups,beforeCalls=engineCalls;
+        activeQueryHook=[&]{ResetAndRebind(actor,replacement);};
+        QueuePath(path,actor,root,pool);if(path==2)RunDelayedJobs(11);taskInterface.Drain();
+        Check(lookups==beforeLookups&&engineCalls==beforeCalls,"old active decision adopted post-query reset scope");
+    }
+    // Handle/actor/manager failures are still resolved at the original task boundary.
+    QueuePath(0,actor,root,pool);references.erase(7);const auto beforeCalls=engineCalls;taskInterface.Drain();Check(engineCalls==beforeCalls,"missing handle called cleanup");
+    QueuePath(0,actor,root,pool);TESObjectREFR nonActor;references[7]=&nonActor;taskInterface.Drain();Check(engineCalls==beforeCalls,"non-actor handle called cleanup");
+    QueuePath(0,actor,root,pool);actor.manager=nullptr;taskInterface.Drain();Check(engineCalls==beforeCalls,"missing graph manager called cleanup");actor.manager=&replacement;
+    // Deliberately document the bound: no same-epoch activity/lifetime policy is added.
+    QueuePath(0,actor,root,pool);g_activeActors.erase(&actor);taskInterface.Drain();Check(engineCalls==beforeCalls+1,"same-epoch cleanup behavior was broadened");
+    const auto previousFallback=fallbackCalls;
+    QueuePath(0,actor,root,pool);QueuePath(1,actor,root,pool);QueuePath(2,actor,root,pool);
+    Check(fallbackCalls==previousFallback+3&&taskInterface.queue.empty()&&g_delayedJobs.empty(),"inactive original paths must remain unchanged");
+    for(unsigned i=0;i<5;++i){const auto old=PlanckCleanup::Capture();ResetAndRebind(actor,replacement);const auto latest=PlanckCleanup::Capture();Check(latest.generation>old.generation&&!PlanckCleanup::IsCurrent(old),"repeated reset reused a ticket");}
+    const auto maximum=(std::numeric_limits<std::uint64_t>::max)();
+    auto state=PlanckCleanup::Next({maximum-1,false});Check(state.generation==maximum&&!state.exhausted,"last generation must be usable");
+    state=PlanckCleanup::Next(state);Check(state.generation==maximum&&state.exhausted,"exhaustion wrapped/reset generation");
+    state=PlanckCleanup::Next(state);Check(state.generation==maximum&&state.exhausted,"retired epoch revived");
+    auto& owner=PlanckCleanup::Owner();owner.state_={maximum,false};QueuePath(0,actor,root,pool);
+    const auto maxTicket=PlanckCleanup::Capture();Check(owner.IsCurrent(maxTicket),"maximum ticket not valid before exhaustion");
+    const auto exhaustedLookups=lookups;ResetObjects();taskInterface.Drain();
+    Check(!PlanckCleanup::Capture().generation&&!PlanckCleanup::IsCurrent(maxTicket)&&lookups==exhaustedLookups,"exhausted owner allowed old cleanup");
+    ResetObjects();Check(!PlanckCleanup::Capture().generation,"repeated reset revived exhausted owner");
+    taskInterface.AddTask(RemoveNonRagdollRigidBodiesFromWorldTask::Create(7,PlanckCleanup::Capture()));taskInterface.Drain();Check(lookups==exhaustedLookups,"invalid ticket reached engine lookup");
+    std::cout<<"PASS "<<checks<<" actual-source reset-only cleanup checks; all3 enqueue paths, query-reset/delayed/queued replacement, owner exhaustion\n";return 0;
+}catch(const std::exception&error){std::cerr<<error.what()<<'\n';return 1;}}

@@ -45,6 +45,7 @@
 #include "pluginapi.h"
 #include "papyrusapi.h"
 #include "draw.h"
+#include "cleanup_epoch.h"
 
 
 // SKSE globals
@@ -4058,6 +4059,7 @@ bool UpdateActorShove(Actor *actor)
 
 void ResetObjects()
 {
+    PlanckCleanup::Invalidate(); // Retire queued cleanup before clearing its old tracking scope.
 #ifdef _DEBUG
     _MESSAGE("%d Reset objects", *g_currentFrameCounter);
 #endif // _DEBUG
@@ -5839,16 +5841,18 @@ void MovementControllerUpdateHook(MovementControllerNPC *movementController, Act
 
 struct RemoveNonRagdollRigidBodiesFromWorldTask : TaskDelegate
 {
-    static RemoveNonRagdollRigidBodiesFromWorldTask *Create(UInt32 refHandle)
+    static RemoveNonRagdollRigidBodiesFromWorldTask *Create(UInt32 refHandle, PlanckCleanup::Ticket epoch)
     {
         RemoveNonRagdollRigidBodiesFromWorldTask *cmd = new RemoveNonRagdollRigidBodiesFromWorldTask;
         if (cmd) {
             cmd->handle = refHandle;
+            cmd->epoch = epoch;
         }
         return cmd;
     }
 
     virtual void Run() {
+        if (!PlanckCleanup::IsCurrent(epoch)) return;
         NiPointer<TESObjectREFR> refr;
         if (LookupREFRByHandle(handle, refr)) {
             if (Actor *actor = DYNAMIC_CAST(refr, TESObjectREFR, Actor)) {
@@ -5868,15 +5872,17 @@ struct RemoveNonRagdollRigidBodiesFromWorldTask : TaskDelegate
     }
 
     UInt32 handle;
+    PlanckCleanup::Ticket epoch;
 };
 
 
 void ActorProcess_ExitFurniture_RemoveCollision_Hook(BSTaskPool *taskPool, NiAVObject *root)
 {
+    const auto epoch = PlanckCleanup::Capture();
     TESObjectREFR *refr = NiAVObject_GetOwner(root);
     if (IsActiveActor(refr)) {
         UInt32 handle = GetOrCreateRefrHandle(refr);
-        g_taskInterface->AddTask(RemoveNonRagdollRigidBodiesFromWorldTask::Create(handle));
+        g_taskInterface->AddTask(RemoveNonRagdollRigidBodiesFromWorldTask::Create(handle, epoch));
         return;
     }
 
@@ -5901,12 +5907,13 @@ void ActorProcess_ExitFurniture_ResetRagdoll_Hook(BSAnimationGraphManager *manag
 
 void ActorProcess_EnterFurniture_SetWorld_Hook(BSAnimationGraphManager *manager, UInt64 *a2, Actor *actor)
 {
+    const auto epoch = PlanckCleanup::Capture();
     if (IsActiveActor(actor)) {
         // We don't want to run RemoveNonRagdollRigidBodiesFromWorld immediately since the stuff is still yet to be added by AddHavok by a task.
         // So we need to make sure we run RemoveNonRagdollRigidBodiesFromWorld at least 1 frame later than the next task queue run.
         UInt32 handle = GetOrCreateRefrHandle(actor);
-        auto job = [handle]() {
-            g_taskInterface->AddTask(RemoveNonRagdollRigidBodiesFromWorldTask::Create(handle));
+        auto job = [handle, epoch]() {
+            g_taskInterface->AddTask(RemoveNonRagdollRigidBodiesFromWorldTask::Create(handle, epoch));
         };
         QueueDelayedJob(job, 0.1);
         return;
@@ -6197,10 +6204,11 @@ void GetUpEnd_NiNode_SetMotionTypeKeyframed_Hook(NiNode *node, UInt32 motionType
 _BSTaskPool_QueueRemoveCollisionFromWorld GetUpEndHandler_Handle_RemoveCollision_BSTaskPool_QueueRemoveCollisionFromWorld_Original = 0;
 void GetUpEndHandler_Handle_RemoveCollision_Hook(BSTaskPool *taskPool, NiAVObject *node)
 {
+    const auto epoch = PlanckCleanup::Capture();
     TESObjectREFR *refr = NiAVObject_GetOwner(node);
     if (refr && IsActiveActor(refr)) {
         UInt32 handle = GetOrCreateRefrHandle(refr);
-        g_taskInterface->AddTask(RemoveNonRagdollRigidBodiesFromWorldTask::Create(handle));
+        g_taskInterface->AddTask(RemoveNonRagdollRigidBodiesFromWorldTask::Create(handle, epoch));
         return;
     }
 

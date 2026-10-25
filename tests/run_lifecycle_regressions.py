@@ -72,6 +72,7 @@ def main():
     source = (ROOT / "src/main.cpp").read_text()
     blocks = {name: extract_function(source, signature) for name, signature in FUNCTIONS.items()}
     fixture = (ROOT / "tests/lifecycle_fixture.cpp.in").read_text()
+    fixture = '#include "' + (ROOT / "include/cleanup_epoch.h").as_posix() + '"\n' + fixture
     for name, block in blocks.items():
         marker = f"/*@{name}@*/"
         if fixture.count(marker) != 1:
