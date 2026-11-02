@@ -6,6 +6,7 @@
 #include <deque>
 #include <optional>
 #include <shared_mutex>
+#include "synergy_hand_parts.h"
 
 #include <Physics/Collide/Shape/Convex/ConvexVertices/hkpConvexVerticesShape.h>
 #include <Physics/Collide/Shape/Convex/Capsule/hkpCapsuleShape.h>
@@ -504,6 +505,7 @@ UInt16 g_playerCollisionGroup = 0;
 
 inline bool IsLeftRigidBody(hkpRigidBody *rigidBody)
 {
+    if(PlanckSynergy::PhysicalHandPart(reinterpret_cast<uintptr_t>(rigidBody))==HIGGS_HAND_LEFT)return true;
     bhkRigidBody *wrapper = (bhkRigidBody *)rigidBody->m_userData;
     if (!wrapper) return false;
     return wrapper == g_leftHand || wrapper == g_leftWeapon || wrapper == g_leftHeldRigidBody;
@@ -518,6 +520,7 @@ inline bool IsPlayerWeaponRigidBody(hkpRigidBody *rigidBody)
 
 inline bool IsPlayerHandRigidBody(hkpRigidBody *rigidBody)
 {
+    if(PlanckSynergy::PhysicalHandPart(reinterpret_cast<uintptr_t>(rigidBody)))return true;
     bhkRigidBody *wrapper = (bhkRigidBody *)rigidBody->m_userData;
     if (!wrapper) return false;
     return wrapper == g_leftHand || wrapper == g_rightHand;
@@ -2034,6 +2037,7 @@ struct PhysicsListener :
 
         hkpRigidBody *rigidBodyA = evnt.m_bodies[0];
         hkpRigidBody *rigidBodyB = evnt.m_bodies[1];
+        PlanckSynergy::HandPartContactScope partContact(reinterpret_cast<uintptr_t>(rigidBodyA),reinterpret_cast<uintptr_t>(rigidBodyB));
 
         UInt32 layerA = GetCollisionLayer(rigidBodyA);
         UInt32 layerB = GetCollisionLayer(rigidBodyB);
@@ -2391,6 +2395,7 @@ struct PhysicsListener :
     {
         hkpRigidBody *rigidBodyA = evnt.m_bodies[0];
         hkpRigidBody *rigidBodyB = evnt.m_bodies[1];
+        PlanckSynergy::HandPartContactScope partContact(reinterpret_cast<uintptr_t>(rigidBodyA),reinterpret_cast<uintptr_t>(rigidBodyB));
 
         bool isAhiggs = IsHiggsRigidBody(rigidBodyA);
         bool isBhiggs = IsHiggsRigidBody(rigidBodyB);
@@ -2454,6 +2459,7 @@ struct PhysicsListener :
         // Now fill in the currently collided-with actors based on active collisions
         for (auto [pair, count] : activeCollisions) {
             auto [bodyA, bodyB] = pair;
+            PlanckSynergy::HandPartContactScope partContact(reinterpret_cast<uintptr_t>(bodyA),reinterpret_cast<uintptr_t>(bodyB));
 
             // There is a case where we touch someone with a held object and then let go.
             // The active collision will remain even though we are no longer holding the object.
@@ -8746,6 +8752,11 @@ extern "C" {
                 g_messaging->RegisterListener(g_pluginHandle, nullptr, PlanckPluginAPI::ModMessageHandler);
             }
             else if (msg->type == SKSEMessagingInterface::kMessage_PostPostLoad) {
+                if(auto module=GetModuleHandleA("higgs_vr.dll")){
+                    const auto query=reinterpret_cast<HIGGS_QueryHandPartsNativeInterfaceFn>(GetProcAddress(module,"HIGGS_QueryHandPartsNativeInterface"));
+                    HIGGS_HandPartsNativeInterface parts{};
+                    if(query&&query(1,sizeof(parts),&parts)==HIGGS_HAND_OK)PlanckSynergy::InstallHandPartResolver(parts);
+                }
                 // Get the HIGGS plugin API
                 HiggsPluginAPI::GetHiggsInterface001(g_pluginHandle, g_messaging);
                 if (g_higgsInterface) {

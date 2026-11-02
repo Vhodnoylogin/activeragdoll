@@ -16,6 +16,8 @@ The additive [scoped NPC drive policy](docs/drive-api.md) lets consumers block p
 
 The separate [compound geometry API](docs/compound-geometry-api.md) copies existing list-child geometry and accepts atomic capsule-fitting proposals for one body. PLANCK clones and owns the physical replacement, preserving filters, disabled state, materials and cached bounds. PPB can retain fitting/anatomical policy without directly changing a shared NPC shape; actual PPB adoption and game qualification remain separate.
 
+Optional native HIGGS attribution also lets PLANCK recognize HIGGS-owned finger bodies through its existing hand/contact path. One copied attribution is used throughout each contact's admission and side interpretation. Existing HIGGS001 remains supported when the additional export is absent; this extension does not require PPB or add a second hit mechanism.
+
 The development branch includes bounded lifecycle repairs for temporary NPC
 movement/look-at restrictions and nested hit-event context. Run their source-backed
 standalone checks with `python tests/run_lifecycle_regressions.py --build-dir <external-directory>`.

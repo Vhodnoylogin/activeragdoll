@@ -22,6 +22,8 @@ The only maintained source of the full concept and illustrative pseudo-ABI is [t
 
 The [additive revision 2 implementation](synergy-api.md) supplies copied NPC/body publications, generation-checked endpoints, scoped hit restriction leases, removable callbacks, real precommit melee/clutter policies and safe-phase capsule geometry adoption through independent engine-created shape clones. A separate revision-3 discovery entry returns the version-1 native endpoint bridge for HIGGS, resolving the live body under graph/world ownership. Revision 001 remains unchanged. Production-core and extracted native-adapter fixtures cover these boundaries; native/game qualification is recorded separately in the [build prerequisites](native-build-prerequisites.md).
 
+Separate negotiated tables now add [actor-scoped drive policies](drive-api.md) and [existing compound-capsule fitting](compound-geometry-api.md). Optional HIGGS native hand-part attribution lets PLANCK recognize owned finger bodies in its existing contact/side path. PPB retains fitting/anatomical interpretation and obtains physical application from these providers; an actual PPB adapter and game acceptance are not delivered by these tables alone.
+
 CommonLib is the second synergy level: reuse its current actor, scene, locking and Havok primitives, and move address handling and repeated technical operations into verified library methods. NPC policy, endpoints and hit commitment remain PLANCK runtime services; common engine code does not take over those decisions.
 
 ## Development branches and retained work
