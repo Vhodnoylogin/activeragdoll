@@ -37,4 +37,4 @@ The verifier compares those four table entries in the selected image and checks 
 
 ## CommonLib preparation
 
-The [canonical migration assessment and inventory](https://github.com/Vhodnoylogin/body-pouches/blob/main/docs/trinity-synergy/commonlib-assessment.md) separate existing CommonLib wrapper candidates, metadata-only matches and operations needing further audit or an extension. These temporary legacy-SDK bindings are candidates for that later library boundary. No CommonLib source or Address Library entry is changed by this build work. Provider generations, input authority and transaction policy remain with HIGGS.
+The [canonical migration assessment and inventory](https://github.com/Vhodnoylogin/body-pouches/blob/main/docs/trinity-synergy/commonlib-assessment.md) separate existing CommonLib wrapper candidates, metadata-only matches and operations needing further audit or an extension. These temporary legacy-SDK bindings are candidates for that later library boundary. No CommonLib source or Address Library entry is changed by this build work. Actor/body generations, physical publication, policy ownership and hit decisions remain with PLANCK.

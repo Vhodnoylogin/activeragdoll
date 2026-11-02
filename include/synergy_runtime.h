@@ -1,6 +1,7 @@
 #pragma once
 #include "planck_synergy.h"
 #include "planck_physical_interop.h"
+#include "synergy_drive_runtime.h"
 #include <cstdint>
 #include <vector>
 namespace PlanckSynergy {

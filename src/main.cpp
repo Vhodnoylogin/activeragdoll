@@ -47,6 +47,7 @@
 #include "draw.h"
 #include "cleanup_epoch.h"
 #include "synergy_runtime.h"
+#include "synergy_drive_native.h"
 
 std::atomic<uint64_t> g_synergyPhysicsTick{0};
 std::atomic<DWORD> g_synergyActorThread{0};
@@ -3643,7 +3644,7 @@ void RestoreAndClearPendingConstraintSnapshot(ActiveRagdoll &ragdoll, hkbRagdoll
 
     if (canRestoreConstraints) {
         hkpEaseConstraintsAction_restoreConstraints(ragdoll.easeConstraintsAction, 0.f);
-        if (Config::options.loosenRagdollConstraintPivots) {
+        if (!ragdoll.originalConstraintPivots.empty()) {
             for (hkpConstraintInstance *constraint : driver->ragdoll->getConstraintArray()) {
                 if (constraint->getData()->getType() == hkpConstraintData::CONSTRAINT_TYPE_RAGDOLL) {
                     hkpRagdollConstraintData *data = (hkpRagdollConstraintData *)constraint->getData();
@@ -5249,6 +5250,8 @@ void PreDriveToPoseHook(hkbRagdollDriver *driver, hkReal deltaTime, const hkbCon
 {
     Actor *actor = GetActorFromRagdollDriver(driver);
     if (!actor) return;
+    const bool loosenActorPivots=PlanckSynergy::MayLoosenPivots(
+        Config::options.loosenRagdollConstraintPivots,reinterpret_cast<uintptr_t>(driver->ragdoll));
 
     hkbGeneratorOutput::TrackHeader *poseHeader = GetTrackHeader(generatorOutput, hkbGeneratorOutput::StandardTracks::TRACK_POSE);
     hkbGeneratorOutput::TrackHeader *worldFromModelHeader = GetTrackHeader(generatorOutput, hkbGeneratorOutput::StandardTracks::TRACK_WORLD_FROM_MODEL);
@@ -5436,7 +5439,7 @@ void PreDriveToPoseHook(hkbRagdollDriver *driver, hkReal deltaTime, const hkbCon
                 ragdoll->easedRagdoll = driver->ragdoll;
 
                 // Loosen constraint pivots first
-                if (Config::options.loosenRagdollConstraintPivots) {
+                if (loosenActorPivots) {
                     ragdoll->originalConstraintPivots.clear();
 
                     for (hkpConstraintInstance *constraint : driver->ragdoll->getConstraintArray()) {
@@ -5510,13 +5513,15 @@ void PreDriveToPoseHook(hkbRagdollDriver *driver, hkReal deltaTime, const hkbCon
                             maxDelta = max(maxDelta, delta);
 
                             // Pivots
-                            NiPoint3 deltaPivot;
-                            data->m_atoms.m_transforms.m_transformA.m_translation = NiPointToHkVector(AdvanceVector(savedData.pivotA, HkVectorToNiPoint(data->m_atoms.m_transforms.m_transformA.m_translation), linearStep, &deltaPivot));
-                            if (VectorLength(deltaPivot) > Config::options.loosenConstraintsActivateDeltaThreshold) shouldActivate = true;
-                            maxDeltaPivot = max(maxDeltaPivot, VectorLength(deltaPivot));
-                            data->m_atoms.m_transforms.m_transformB.m_translation = NiPointToHkVector(AdvanceVector(savedData.pivotB, HkVectorToNiPoint(data->m_atoms.m_transforms.m_transformB.m_translation), linearStep, &deltaPivot));
-                            if (VectorLength(deltaPivot) > Config::options.loosenConstraintsActivateDeltaThreshold) shouldActivate = true;
-                            maxDeltaPivot = max(maxDeltaPivot, VectorLength(deltaPivot));
+                            if (loosenActorPivots) {
+                                NiPoint3 deltaPivot;
+                                data->m_atoms.m_transforms.m_transformA.m_translation = NiPointToHkVector(AdvanceVector(savedData.pivotA, HkVectorToNiPoint(data->m_atoms.m_transforms.m_transformA.m_translation), linearStep, &deltaPivot));
+                                if (VectorLength(deltaPivot) > Config::options.loosenConstraintsActivateDeltaThreshold) shouldActivate = true;
+                                maxDeltaPivot = max(maxDeltaPivot, VectorLength(deltaPivot));
+                                data->m_atoms.m_transforms.m_transformB.m_translation = NiPointToHkVector(AdvanceVector(savedData.pivotB, HkVectorToNiPoint(data->m_atoms.m_transforms.m_transformB.m_translation), linearStep, &deltaPivot));
+                                if (VectorLength(deltaPivot) > Config::options.loosenConstraintsActivateDeltaThreshold) shouldActivate = true;
+                                maxDeltaPivot = max(maxDeltaPivot, VectorLength(deltaPivot));
+                            }
                         }
                     }
                 }
@@ -6037,11 +6042,25 @@ void PostPostPhysicsHook(hkbRagdollDriver *driver, const hkbContext &context, hk
 _hkbRagdollDriver_driveToPose hkbRagdollDriver_driveToPose_Original = 0;
 void DriveToPoseHook(hkbRagdollDriver *driver, hkReal deltaTime, const hkbContext &context, hkbGeneratorOutput &generatorOutput)
 {
-    PreDriveToPoseHook(driver, deltaTime, context, generatorOutput);
-    hkbRagdollDriver_driveToPose_Original(driver, deltaTime, context, generatorOutput);
-    PostDriveToPoseHook(driver, deltaTime, context, generatorOutput);
-
-    g_currentlyDrivingRagdoll = nullptr; // set in PreDriveToPoseHook
+    struct Invocation {hkbRagdollDriver* driver;hkReal deltaTime;const hkbContext& context;hkbGeneratorOutput& output;};
+    Invocation invocation{driver,deltaTime,context,generatorOutput};
+    uintptr_t bodies[256]{};uint32_t count=0;uintptr_t lineage=0,model=0;
+    if(driver&&driver->ragdoll){
+        lineage=reinterpret_cast<uintptr_t>(driver->ragdoll);
+        const int nativeCount=driver->ragdoll->m_rigidBodies.getSize();
+        if(nativeCount>0&&nativeCount<=256){count=static_cast<uint32_t>(nativeCount);
+            for(uint32_t i=0;i<count;++i)bodies[i]=reinterpret_cast<uintptr_t>(driver->ragdoll->m_rigidBodies[static_cast<int>(i)]);}
+        if(Actor* actor=GetActorFromRagdollDriver(driver))model=reinterpret_cast<uintptr_t>(actor->GetNiNode());
+    }
+    auto execute=+[](const PlanckSynergy::DrivePlan& plan,PlanckSynergy::DriveExecution& execution,void* opaque){
+        auto& call=*static_cast<Invocation*>(opaque);PlanckSynergy::ScopedDriveInvocation scope(plan,execution);
+        PreDriveToPoseHook(call.driver,call.deltaTime,call.context,call.output);
+        hkbRagdollDriver_driveToPose_Original(call.driver,call.deltaTime,call.context,call.output);
+        PostDriveToPoseHook(call.driver,call.deltaTime,call.context,call.output);
+        g_currentlyDrivingRagdoll=nullptr; // original lifecycle, no new driver
+    };
+    PlanckSynergy::ExecuteNativeDrive(model,lineage,bodies,count,*g_currentFrameCounter,
+        g_synergyPhysicsTick.load(),execute,&invocation);
 }
 
 _hkbRagdollDriver_postPhysics hkbRagdollDriver_postPhysics_Original = 0;
@@ -6555,6 +6574,8 @@ void hkbRagdollDriver_mapHighResPoseLocalToLowResPoseLocal_hkaSkeletonMapper_map
 _hkaRagdollRigidBodyController_driveToPose hkbRagdollDriver_driveToPose_hkaRagdollRigidBodyController_driveToPose_Original = 0;
 void hkbRagdollDriver_driveToPose_hkaRagdollRigidBodyController_driveToPose_Hook(hkaRagdollRigidBodyController *_this, hkReal deltaTime, hkQsTransform *poseLocalSpace, const hkQsTransform &worldFromModel, hkaKeyFrameHierarchyUtility::Output *stressOut)
 {
+    static_cast<void>(stressOut); // PLANCK uses its own stress buffer below.
+    PlanckSynergy::ScopedDriveControls<hkaRagdollRigidBodyController> driveControls(*_this);
     if (Config::options.applyRigidBodyTWhenWritingRigidBodies) {
         ApplyRigidBodyTTransformsToPose(_this->m_ragdollInstance, worldFromModel, poseLocalSpace, poseLocalSpace);
     }

@@ -12,6 +12,8 @@ The [native build procedure](docs/native-build-prerequisites.md) builds the comp
 
 This mod is also complicated.
 
+The additive [scoped NPC drive policy](docs/drive-api.md) lets consumers block pivot loosening for a specific actor and request bounded controller gains/body weights. PLANCK applies and restores those inputs around its existing driver call, with copied observations and explicit ownership conflicts; consumers do not need a second ragdoll actuator for these operations. It does not implement PPB's complete pose pipeline.
+
 The development branch includes bounded lifecycle repairs for temporary NPC
 movement/look-at restrictions and nested hit-event context. Run their source-backed
 standalone checks with `python tests/run_lifecycle_regressions.py --build-dir <external-directory>`.

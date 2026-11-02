@@ -22,6 +22,7 @@ void *GetApi(unsigned int revisionNumber) {
     case 1:	_MESSAGE("Interface revision 1 requested"); return &g_interface001;
     case 2: return const_cast<PlanckSynergyAPI*>(PlanckSynergy::GetAPI());
     case 3: return const_cast<PlanckPhysicalInteropAPI*>(PlanckSynergy::GetPhysicalInteropAPI());
+    case 4: return const_cast<PlanckDriveAPI*>(PlanckSynergy::GetDriveAPI());
     }
     return nullptr;
 }

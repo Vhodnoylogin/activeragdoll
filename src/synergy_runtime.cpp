@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <deque>
+#include <exception>
 #include <limits>
 #include <map>
 #include <memory>
@@ -13,16 +14,21 @@
 namespace PlanckSynergy {
 namespace {
 constexpr size_t MaxClients=64, MaxResources=512, MaxBodies=256, MaxActors=512, MaxHits=256;
-constexpr uint64_t EventMask=63;
+constexpr uint64_t EventMask=255;
 struct Client { std::string id; bool closing=false; };
-struct ActorState { uintptr_t model=0; PlanckActorPhysics state{}; std::vector<BodySample> bodies; };
-enum class Kind { Subscription, Endpoint, ActorPolicy, HitPolicy, Geometry };
+struct ActorState {
+    uintptr_t model=0;PlanckActorPhysics state{};std::vector<BodySample> bodies;
+    PlanckDriveSnapshot drive{};std::vector<PlanckDriveBody> driveBodies;
+};
+enum class Kind { Subscription, Endpoint, ActorPolicy, HitPolicy, Geometry, DrivePolicy };
 struct Resource {
     Kind kind{}; PlanckToken owner=0; bool active=true; uint32_t inFlight=0;
     uint64_t mask=0; PlanckEventCallback event=nullptr; PlanckHitPolicyCallback hit=nullptr;
     void* context=nullptr;
     PlanckEndpoint endpoint{}; PlanckActorPolicy actorPolicy{}; PlanckHitPolicy hitPolicy{};
     PlanckGeometryRequest geometry{};PlanckRequestResult result{};bool dispatched=false,nativeCommitted=false;
+    PlanckDrivePolicy drivePolicy{};std::vector<PlanckDriveWeight> driveWeights;
+    uint64_t lastDriveSample=0;
 };
 struct Registry {
     std::mutex lock;
@@ -108,6 +114,11 @@ void RetireActorLocked(Registry& r,PlanckActorRef actor,std::vector<uint64_t>& e
         }
     }
 }
+void RetireDrivePoliciesLocked(Registry& r,PlanckActorRef actor,std::vector<uint64_t>& leases){
+    for(auto& [id,res]:r.resources)if(res->kind==Kind::DrivePolicy&&res->active&&Same(res->drivePolicy.actor,actor)){
+        res->active=false;leases.push_back(id);
+    }
+}
 PlanckStatus RegisterClient(const PlanckClientIdentity* info,PlanckToken* output) {
     if(output)*output=0;
     if(!Sized(info)||!output||info->reserved||!info->id[0]||!std::memchr(info->id,0,sizeof(info->id)))return PLANCK_INVALID;
@@ -176,7 +187,7 @@ PlanckStatus ValidateEndpoint(PlanckToken owner,PlanckToken id,PlanckEndpoint* o
 }
 PlanckStatus ReleaseLease(PlanckToken owner,PlanckToken id) {
     auto& r=State();std::lock_guard guard(r.lock);auto status=ClientStatus(r,owner,true);if(status)return status;
-    auto res=Owned(r,owner,id);if(!res||(res->kind!=Kind::Endpoint&&res->kind!=Kind::ActorPolicy&&res->kind!=Kind::Geometry))return PLANCK_INVALID;
+    auto res=Owned(r,owner,id);if(!res||(res->kind!=Kind::Endpoint&&res->kind!=Kind::ActorPolicy&&res->kind!=Kind::Geometry&&res->kind!=Kind::DrivePolicy))return PLANCK_INVALID;
     if(res->inFlight||res->dispatched||res->nativeCommitted)return PLANCK_BUSY;
     r.resources.erase(id);return PLANCK_OK;
 }
@@ -254,6 +265,52 @@ PlanckStatus CancelRequest(PlanckToken owner,PlanckToken id) {
     if(emit)Emit(PLANCK_REQUEST_RESULT,id,actor,PLANCK_PHASE_LIFECYCLE);
     return PLANCK_OK;
 }
+PlanckStatus RequestDrivePolicy(PlanckToken owner,const PlanckDrivePolicy* proposal,
+    const PlanckDriveWeight* weights,PlanckToken* output){
+    if(output)*output=0;
+    if(!Sized(proposal)||!output||!Valid(proposal->actor)||proposal->reserved||
+        (proposal->flags&~PLANCK_DRIVE_BLOCK_PIVOT_LOOSENING)||(proposal->gainMask&~7u)||
+        proposal->weightCount>MaxBodies||(proposal->weightCount&&!weights)||
+        !(proposal->flags||proposal->gainMask||proposal->weightCount))return PLANCK_INVALID;
+    const float gains[]{proposal->hierarchyGain,proposal->velocityGain,proposal->positionGain};
+    for(unsigned i=0;i<3;++i)if((proposal->gainMask&(1u<<i))?!Scale(gains[i]):gains[i]!=0.f)return PLANCK_INVALID;
+    if(callbackDepth)return PLANCK_REENTRANT;
+    std::vector<PlanckDriveWeight> copied;
+    for(uint32_t i=0;i<proposal->weightCount;++i){
+        const auto& w=weights[i];
+        if(!Sized(&w)||w.reserved||w.reserved2||!Valid(w.body)||!Same(w.body.actor,proposal->actor)||
+            !std::isfinite(w.multiplier)||w.multiplier<0.f||w.multiplier>8.f)return PLANCK_INVALID;
+        for(const auto& before:copied)if(Same(before.body,w.body))return PLANCK_INVALID;
+        copied.push_back(w);
+    }
+    auto& r=State();std::lock_guard guard(r.lock);auto status=ClientStatus(r,owner);if(status)return status;
+    if(!CurrentActor(r,proposal->actor))return PLANCK_STALE;
+    for(const auto& w:copied)if(!FindBody(r,w.body))return PLANCK_STALE;
+    if(proposal->gainMask||proposal->weightCount)
+        for(const auto& [id,res]:r.resources)if(res->kind==Kind::DrivePolicy&&(res->active||res->inFlight)&&
+            Same(res->drivePolicy.actor,proposal->actor)&&(res->drivePolicy.gainMask||res->drivePolicy.weightCount))return PLANCK_CONFLICT;
+    if(r.resources.size()>=MaxResources)return PLANCK_LIMIT;auto id=r.Next();if(!id)return PLANCK_LIMIT;
+    auto res=std::make_shared<Resource>();res->kind=Kind::DrivePolicy;res->owner=owner;
+    res->drivePolicy=*proposal;res->driveWeights=std::move(copied);r.resources.emplace(id,res);*output=id;return PLANCK_OK;
+}
+PlanckStatus CopyDrive(PlanckToken owner,uint32_t actor,PlanckDriveSnapshot* output,
+    PlanckDriveBody* bodies,uint32_t capacity,uint32_t* required){
+    if(!Sized(output)||!required||(capacity&&!bodies))return PLANCK_INVALID;
+    auto& r=State();std::lock_guard guard(r.lock);auto status=ClientStatus(r,owner);if(status)return status;
+    if(r.suspended)return PLANCK_STALE;auto it=r.actors.find(actor);
+    if(it==r.actors.end()||!it->second.drive.sample)return PLANCK_NOT_FOUND;
+    *required=static_cast<uint32_t>(it->second.driveBodies.size());if(capacity<*required)return PLANCK_BUFFER;
+    for(uint32_t i=0;i<*required;++i)if(!Sized(&bodies[i]))return PLANCK_INVALID;
+    *output=it->second.drive;for(uint32_t i=0;i<*required;++i)bodies[i]=it->second.driveBodies[i];return PLANCK_OK;
+}
+PlanckStatus CopyDrivePolicy(PlanckToken owner,PlanckToken lease,PlanckDrivePolicyState* output){
+    if(!Sized(output))return PLANCK_INVALID;
+    auto& r=State();std::lock_guard guard(r.lock);auto status=ClientStatus(r,owner,true);if(status)return status;
+    auto res=Owned(r,owner,lease);if(!res||res->kind!=Kind::DrivePolicy)return PLANCK_INVALID;
+    const uint32_t phase=!res->active||!CurrentActor(r,res->drivePolicy.actor)?PLANCK_DRIVE_POLICY_STALE:
+        res->lastDriveSample?PLANCK_DRIVE_POLICY_OBSERVED:PLANCK_DRIVE_POLICY_ACCEPTED;
+    *output={sizeof(PlanckDrivePolicyState),phase,lease,res->drivePolicy.actor,res->lastDriveSample};return PLANCK_OK;
+}
 PlanckStatus WithEndpoint(PlanckToken owner,PlanckToken lease,PlanckEndpointVisitor visitor,void* context) {
     if(!visitor)return PLANCK_INVALID;
     if(callbackDepth)return PLANCK_REENTRANT;
@@ -284,9 +341,76 @@ PlanckSynergyAPI api={sizeof(PlanckSynergyAPI),2,15,
     Boundary<ReleaseLease>::Call,Boundary<RequestPolicy>::Call,Boundary<RegisterHitPolicy>::Call,Boundary<CopyHit>::Call,
     Boundary<RequestGeometry>::Call,Boundary<GetResult>::Call,Boundary<CancelRequest>::Call};
 const PlanckPhysicalInteropAPI physicalAPI={sizeof(PlanckPhysicalInteropAPI),1,Boundary<WithEndpoint>::Call};
+const PlanckDriveAPI driveAPI={sizeof(PlanckDriveAPI),1,Boundary<RequestDrivePolicy>::Call,
+    Boundary<CopyDrive>::Call,Boundary<CopyDrivePolicy>::Call};
 }
 const PlanckSynergyAPI* GetAPI(){return &api;}
 const PlanckPhysicalInteropAPI* GetPhysicalInteropAPI(){return &physicalAPI;}
+const PlanckDriveAPI* GetDriveAPI(){return &driveAPI;}
+bool IsDrivePlanCurrent(const DrivePlan& plan){
+    auto& r=State();std::lock_guard guard(r.lock);if(!CurrentActor(r,plan.actor))return false;
+    for(const auto& expected:plan.bones){auto* body=FindBody(r,expected.body);
+        if(!body||body->identity!=expected.identity||body->lineage!=plan.lineage)return false;}
+    return !plan.bones.empty();
+}
+void ExecuteNativeDrive(uintptr_t model,uintptr_t lineage,const uintptr_t* bodies,uint32_t count,
+    uint64_t frame,uint64_t tick,NativeDriveAction action,void* context){
+    if(!action)return;auto& r=State();std::unique_lock nativeGuard(r.nativeGate);
+    DrivePlan plan;DriveExecution execution;std::vector<std::shared_ptr<Resource>> flight;
+    {
+        std::lock_guard guard(r.lock);
+        if(!r.suspended&&model&&lineage&&bodies&&count&&count<=MaxBodies)
+            for(auto& [handle,actor]:r.actors){
+                if(actor.model!=model)continue;
+                std::vector<DriveBonePlan> matched;
+                for(uint32_t i=0;i<count;++i){
+                    auto found=std::find_if(actor.bodies.begin(),actor.bodies.end(),[&](const auto& body){return body.identity==bodies[i]&&body.lineage==lineage;});
+                    if(!bodies[i]||found==actor.bodies.end())break;
+                    if(std::any_of(matched.begin(),matched.end(),[&](const auto& previous){return previous.identity==bodies[i];}))break;
+                    matched.push_back({bodies[i],found->state.body,1.f});
+                }
+                if(matched.size()!=count)continue;
+                plan.actor=actor.state.actor;plan.lineage=lineage;plan.bones=std::move(matched);break;
+            }
+        if(plan.actor.handle)for(auto& [id,res]:r.resources)if(res->kind==Kind::DrivePolicy&&res->active&&Same(res->drivePolicy.actor,plan.actor)){
+            plan.flags|=res->drivePolicy.flags;
+            if(res->drivePolicy.gainMask||res->drivePolicy.weightCount){
+                plan.numericalPolicy=id;plan.gainMask=res->drivePolicy.gainMask;
+                plan.weightPolicy=res->drivePolicy.weightCount!=0;
+                plan.hierarchyGain=res->drivePolicy.hierarchyGain;plan.velocityGain=res->drivePolicy.velocityGain;plan.positionGain=res->drivePolicy.positionGain;
+                for(const auto& w:res->driveWeights)for(auto& bone:plan.bones)if(Same(w.body,bone.body))bone.multiplier=w.multiplier;
+            }
+            ++res->inFlight;flight.push_back(res);
+        }
+    }
+    std::exception_ptr failure;
+    try{action(plan,execution,context);}catch(...){execution.status=PLANCK_CANCELLED;failure=std::current_exception();}
+    uint64_t sample=0;PlanckActorRef actorRef=plan.actor;
+    {
+        std::lock_guard guard(r.lock);
+        for(auto& resource:flight)--resource->inFlight;
+        auto actor=r.actors.find(plan.actor.handle);
+        if(plan.actor.handle&&actor!=r.actors.end()&&CurrentActor(r,plan.actor)){
+            sample=r.Next();
+            if(sample){
+                bool coherent=execution.bodies.size()==plan.bones.size();
+                if(coherent)for(size_t i=0;i<plan.bones.size();++i)if(!Same(execution.bodies[i].body,plan.bones[i].body)){coherent=false;break;}
+                if(!coherent){execution.bodies.clear();if(execution.status==PLANCK_OK)execution.status=PLANCK_INVALID;}
+                auto& current=actor->second;
+                current.drive={sizeof(PlanckDriveSnapshot),static_cast<uint32_t>(execution.bodies.size()),plan.actor,
+                    sample,frame,tick,plan.numericalPolicy,PLANCK_PHASE_DRIVE,
+                    uint32_t((plan.flags&PLANCK_DRIVE_BLOCK_PIVOT_LOOSENING)!=0),execution.status,0,
+                    execution.hierarchyGain,execution.velocityGain,execution.positionGain,execution.paletteCount};
+                current.driveBodies=std::move(execution.bodies);
+                for(auto& resource:flight)if(execution.status==PLANCK_OK||
+                    (execution.pivotPolicyObserved&&!resource->drivePolicy.gainMask&&!resource->drivePolicy.weightCount))resource->lastDriveSample=sample;
+            }
+        }
+    }
+    nativeGuard.unlock();
+    if(sample)Emit(PLANCK_DRIVE_OBSERVED,sample,actorRef,PLANCK_PHASE_DRIVE);
+    if(failure)std::rethrow_exception(failure);
+}
 void InstallNativeEndpointResolver(NativeEndpointResolver resolver){auto& r=State();std::lock_guard guard(r.lock);r.endpointResolver=resolver;}
 void SetGeometryExecutorAvailable(bool available){
     auto& r=State();std::lock_guard guard(r.lock);r.geometryAvailable=available;
@@ -369,7 +493,7 @@ PlanckStatus VisitResolvedEndpoint(PlanckToken owner,PlanckToken lease,uintptr_t
 void PublishActor(uint32_t handle,uintptr_t model,bool ragdolled,uint64_t frame,uint64_t tick,double time,const std::vector<BodySample>& bodies,DeferredEvents* deferred) {
     if(!handle)return;
     if(!model||bodies.empty()||bodies.size()>MaxBodies){InvalidateActor(handle,deferred);return;}
-    auto& r=State();std::lock_guard nativeGuard(r.nativeGate);std::vector<uint64_t> invalidated,cancelled;PlanckActorRef old{},current{};bool changed=false;
+    auto& r=State();std::lock_guard nativeGuard(r.nativeGate);std::vector<uint64_t> invalidated,cancelled,driveInvalidated;PlanckActorRef old{},current{};bool changed=false;
     {
         std::lock_guard guard(r.lock);
         if(r.suspended||r.exhausted)return;
@@ -381,7 +505,7 @@ void PublishActor(uint32_t handle,uintptr_t model,bool ragdolled,uint64_t frame,
         const auto sample=++r.sample;
         if(replaced) {
             changed=true;
-            if(it!=r.actors.end()){old=it->second.state.actor;RetireActorLocked(r,old,invalidated,cancelled);}
+            if(it!=r.actors.end()){old=it->second.state.actor;RetireActorLocked(r,old,invalidated,cancelled);RetireDrivePoliciesLocked(r,old,driveInvalidated);}
             const auto generation=r.Next();if(!generation)return;
             current={r.epoch,generation,handle,0};
             for(size_t i=0;i<bodies.size();++i) {
@@ -391,6 +515,7 @@ void PublishActor(uint32_t handle,uintptr_t model,bool ragdolled,uint64_t frame,
             }
         }else{
             current=it->second.state.actor;changed=it->second.state.ragdolled!=static_cast<uint32_t>(ragdolled);
+            next.drive=it->second.drive;next.driveBodies=it->second.driveBodies;
             for(size_t i=0;i<bodies.size();++i){
                 next.bodies[i].state.body=it->second.bodies[i].state.body;
                 auto& before=it->second.bodies[i].state;auto& after=next.bodies[i].state;
@@ -406,16 +531,18 @@ void PublishActor(uint32_t handle,uintptr_t model,bool ragdolled,uint64_t frame,
     DeferredEvents events;
     for(auto id:invalidated)events.push_back({PLANCK_ENDPOINT_INVALIDATED,id,old,PLANCK_PHASE_MAIN});
     for(auto id:cancelled)events.push_back({PLANCK_REQUEST_RESULT,id,old,PLANCK_PHASE_MAIN});
+    for(auto id:driveInvalidated)events.push_back({PLANCK_DRIVE_POLICY_INVALIDATED,id,old,PLANCK_PHASE_MAIN});
     if(changed)events.push_back({PLANCK_ACTOR_CHANGED,0,current,PLANCK_PHASE_MAIN});
     if(deferred)deferred->insert(deferred->end(),events.begin(),events.end());else DispatchEvents(events);
 }
 void DispatchEvents(const DeferredEvents& events){for(const auto& event:events)Emit(event.type,event.subject,event.actor,event.phase);}
 void InvalidateActor(uint32_t handle,DeferredEvents* deferred){
-    auto& r=State();std::lock_guard nativeGuard(r.nativeGate);PlanckActorRef old{};std::vector<uint64_t> endpoints,cancelled;
-    {std::lock_guard guard(r.lock);auto it=r.actors.find(handle);if(it==r.actors.end())return;old=it->second.state.actor;RetireActorLocked(r,old,endpoints,cancelled);r.actors.erase(it);}
+    auto& r=State();std::lock_guard nativeGuard(r.nativeGate);PlanckActorRef old{};std::vector<uint64_t> endpoints,cancelled,driveInvalidated;
+    {std::lock_guard guard(r.lock);auto it=r.actors.find(handle);if(it==r.actors.end())return;old=it->second.state.actor;RetireActorLocked(r,old,endpoints,cancelled);RetireDrivePoliciesLocked(r,old,driveInvalidated);r.actors.erase(it);}
     DeferredEvents events;
     for(auto id:endpoints)events.push_back({PLANCK_ENDPOINT_INVALIDATED,id,old,PLANCK_PHASE_LIFECYCLE});
     for(auto id:cancelled)events.push_back({PLANCK_REQUEST_RESULT,id,old,PLANCK_PHASE_LIFECYCLE});
+    for(auto id:driveInvalidated)events.push_back({PLANCK_DRIVE_POLICY_INVALIDATED,id,old,PLANCK_PHASE_LIFECYCLE});
     events.push_back({PLANCK_ACTOR_CHANGED,0,old,PLANCK_PHASE_LIFECYCLE});
     if(deferred)deferred->insert(deferred->end(),events.begin(),events.end());else DispatchEvents(events);
 }
@@ -425,12 +552,13 @@ void InvalidateBody(uintptr_t identity){
     for(auto handle:handles)InvalidateActor(handle);
 }
 void Reset(){
-    auto& r=State();std::lock_guard nativeGuard(r.nativeGate);std::vector<std::pair<uint64_t,PlanckActorRef>> endpoints,cancelled;
+    auto& r=State();std::lock_guard nativeGuard(r.nativeGate);std::vector<std::pair<uint64_t,PlanckActorRef>> endpoints,cancelled,driveInvalidated;
     {std::lock_guard guard(r.lock);
         if(r.epoch==(std::numeric_limits<uint64_t>::max)())r.exhausted=true;else ++r.epoch;
         for(auto& [id,res]:r.resources){
             if(res->kind==Kind::Endpoint&&res->active)endpoints.emplace_back(id,res->endpoint.body.actor);
             if(res->kind==Kind::Endpoint||res->kind==Kind::ActorPolicy)res->active=false;
+            if(res->kind==Kind::DrivePolicy&&res->active){res->active=false;driveInvalidated.emplace_back(id,res->drivePolicy.actor);}
             if(res->kind==Kind::Geometry&&res->result.stage==PLANCK_REQUEST_ACCEPTED){
                 res->active=false;res->nativeCommitted=false;res->result.stage=PLANCK_REQUEST_CANCELLED;res->result.status=PLANCK_STALE;
                 cancelled.emplace_back(id,res->geometry.body.actor);
@@ -440,6 +568,7 @@ void Reset(){
     }
     for(auto [id,actor]:endpoints)Emit(PLANCK_ENDPOINT_INVALIDATED,id,actor,PLANCK_PHASE_LIFECYCLE);
     for(auto [id,actor]:cancelled)Emit(PLANCK_REQUEST_RESULT,id,actor,PLANCK_PHASE_LIFECYCLE);
+    for(auto [id,actor]:driveInvalidated)Emit(PLANCK_DRIVE_POLICY_INVALIDATED,id,actor,PLANCK_PHASE_LIFECYCLE);
     Emit(PLANCK_RESET,0,{},PLANCK_PHASE_LIFECYCLE);
 }
 void SetSuspended(bool suspended){

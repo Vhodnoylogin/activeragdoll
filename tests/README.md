@@ -37,6 +37,8 @@ and reset, including already-queued work and separate stale-run/recaptured-ticke
 negative controls. See [its bounded contract](../docs/deferred-cleanup.md).
 # Additive cooperation API checks
 
+The separate `python tests/run_drive_tests.py --build-dir <external-directory>` checks query-revision4's scoped drive policy, a C11 consumer, actual outer/inner hook extraction, owner/conflict and lifecycle races, native weight composition/saturation and field-only exception restoration. Two negative controls remove the clamp and weight restoration. See [the bounded contract](../docs/drive-api.md). These explicit CPU seams do not replace native/game qualification.
+
 `python tests/run_synergy_tests.py --build-dir <external-directory>` compiles the
 actual production `src/synergy_runtime.cpp`, a C11 consumer and C++ checks with
 warnings treated as errors. It covers owner isolation, generations/reset/loading,

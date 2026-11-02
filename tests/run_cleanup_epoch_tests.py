@@ -55,10 +55,22 @@ def main():
     baseline_hash = subprocess.check_output(["git", "rev-parse", "--verify", args.baseline + "^{commit}"], cwd=ROOT, text=True).strip()
     baseline = subprocess.check_output(["git", "show", baseline_hash + ":src/main.cpp"], cwd=ROOT, text=True)
     untouched = {}
+    approved_constraint_changes = {}
     for signature in ("void RestoreAndClearPendingConstraintSnapshot(", "bool RemoveRagdollFromWorld("):
         current = helpers.extract_function(source, signature)
-        if current != helpers.extract_function(baseline, signature):
-            raise RuntimeError("Constraint restoration/removal changed: " + signature)
+        original = helpers.extract_function(baseline, signature)
+        if current != original:
+            # Scoped drive policy must restore an already-saved pivot snapshot
+            # even if future pivot loosening is now disabled. The actual helper
+            # is executed by run_drive_tests.py; permit only this exact delta.
+            allowed = original.replace("if (Config::options.loosenRagdollConstraintPivots) {",
+                "if (!ragdoll.originalConstraintPivots.empty()) {")
+            if signature != "void RestoreAndClearPendingConstraintSnapshot(" or current != allowed:
+                raise RuntimeError("Constraint restoration/removal changed: " + signature)
+            approved_constraint_changes[signature] = {"baselineSha256": hashlib.sha256(original.encode()).hexdigest(),
+                "currentSha256": hashlib.sha256(current.encode()).hexdigest(),
+                "change": "Restore actual saved pivots independently of the future loosening policy; actual-source helper tested in run_drive_tests.py"}
+            continue
         untouched[signature] = hashlib.sha256(current.encode()).hexdigest()
     expected = json.loads((ROOT / "tests/official001-sha256.json").read_text())
     for name, digest in expected.items():
@@ -135,7 +147,7 @@ def main():
     for p in pins:
         if hashlib.sha256(p.read_bytes()).hexdigest() != hashes[str(p)]:
             raise RuntimeError("Source changed during fixture: " + str(p))
-    manifest = {"sourcePins": hashes, "baselineCommit": baseline_hash, "baselineSourceSha256": hashlib.sha256(baseline.encode()).hexdigest(), "untouchedConstraintFunctions": untouched, "results": results,
+    manifest = {"sourcePins": hashes, "baselineCommit": baseline_hash, "baselineSourceSha256": hashlib.sha256(baseline.encode()).hexdigest(), "untouchedConstraintFunctions": untouched, "approvedConstraintChanges": approved_constraint_changes, "results": results,
         "official001Unchanged": True, "gameStarts": 0, "nativePluginLoads": 0,
         "boundary": "Actual selected production tasks, all3 enqueue hooks, delayed queue and ResetObjects with fake engine/task interfaces; test-only private numeric owner exhaustion. Reset-only fence; no same-epoch deactivation, concurrent reset/engine transaction or full Havok lifetime qualification."}
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
