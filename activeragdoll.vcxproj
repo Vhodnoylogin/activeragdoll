@@ -173,6 +173,7 @@
     <ClCompile Include="src\synergy_runtime.cpp" />
     <ClCompile Include="src\RE\havok.cpp" />
     <ClCompile Include="src\RE\offsets.cpp" />
+    <ClCompile Include="src\RE\sdk_bindings.cpp" />
     <ClCompile Include="src\utils.cpp" />
   </ItemGroup>
   <ItemGroup>

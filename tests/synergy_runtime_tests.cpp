@@ -90,16 +90,72 @@ void Drainage(){
     assert(api->Unsubscribe(c,sub)==PLANCK_BUSY);leave.store(true);emitter.join();assert(api->Unsubscribe(c,sub)==PLANCK_OK);assert(api->ReleaseClient(c)==PLANCK_OK);
 }
 void GeometryRequests(){
-    Reset();Publish();auto c=Client("geometry.unsupported");auto q=Geometry(Copy(c));PlanckToken request=999;
+    Reset();SetGeometryExecutorAvailable(false);Publish();auto c=Client("geometry");auto q=Geometry(Copy(c));PlanckToken request=999;
     assert(!(api->capabilities&PLANCK_CAP_CAPSULE_GEOMETRY));
     assert(api->RequestActorGeometry(c,&q,&request)==PLANCK_UNSUPPORTED&&request==0);
-    assert(Copy(c).capsuleRadius==.1f&&Copy(c).geometryRevision==1);
+    SetGeometryExecutorAvailable(true);assert(api->capabilities&PLANCK_CAP_CAPSULE_GEOMETRY);
+    auto degenerate=q;degenerate.capsuleB=degenerate.capsuleA;
+    assert(api->RequestActorGeometry(c,&degenerate,&request)==PLANCK_INVALID&&request==0);
+    assert(api->RequestActorGeometry(c,&q,&request)==PLANCK_OK&&request);
+    PlanckToken other=0;assert(api->RequestActorGeometry(c,&q,&other)==PLANCK_CONFLICT);
     PlanckRequestResult result{sizeof(result)};
-    assert(api->GetRequestResult(c,123,&result)==PLANCK_UNSUPPORTED);
-    assert(api->CancelRequest(c,123)==PLANCK_UNSUPPORTED);
-    InvalidateBody(100);Publish(200);
-    request=999;assert(api->RequestActorGeometry(c,&q,&request)==PLANCK_UNSUPPORTED&&request==0);
+    assert(api->GetRequestResult(c,request,&result)==PLANCK_OK&&result.stage==PLANCK_REQUEST_ACCEPTED);
+    unsigned called=0;
+    auto execute=+[](PlanckToken id,const BodySample& body,const PlanckGeometryRequest& p,void* x){
+        assert(id);
+        assert(body.identity==100&&p.radius==.12f);++*static_cast<unsigned*>(x);return PlanckStatus(PLANCK_OK);
+    };
+    DeferredEvents deferred;ProcessActorGeometry(42,999,Bodies(),execute,&called,&deferred);
+    assert(called==1&&Copy(c).capsuleRadius==.12f&&Copy(c).geometryRevision==2);
+    assert(api->GetRequestResult(c,request,&result)==PLANCK_OK&&result.stage==PLANCK_REQUEST_COMPLETED&&result.geometryRevision==2);
+    assert(api->CancelRequest(c,request)==PLANCK_OK);assert(api->ReleaseLease(c,request)==PLANCK_OK);
+    assert(api->RequestActorGeometry(c,&q,&request)==PLANCK_STALE);
+    q=Geometry(Copy(c));assert(api->RequestActorGeometry(c,&q,&request)==PLANCK_OK);
+    assert(api->CancelRequest(c,request)==PLANCK_OK);
+    ProcessActorGeometry(42,999,Bodies(),execute,&called,&deferred);assert(called==1);
+    assert(api->GetRequestResult(c,request,&result)==PLANCK_OK&&result.stage==PLANCK_REQUEST_CANCELLED);
+    assert(api->ReleaseLease(c,request)==PLANCK_OK);
+    assert(api->RequestActorGeometry(c,&q,&request)==PLANCK_OK);InvalidateBody(100);Publish(200);
+    assert(api->GetRequestResult(c,request,&result)==PLANCK_OK&&result.stage==PLANCK_REQUEST_CANCELLED);
+    ProcessActorGeometry(42,999,Bodies(200),execute,&called,&deferred);assert(called==1);
+    assert(api->ReleaseLease(c,request)==PLANCK_OK);
+    q=Geometry(Copy(c));assert(api->RequestActorGeometry(c,&q,&request)==PLANCK_OK);
+    auto pending=+[](PlanckToken,const BodySample&,const PlanckGeometryRequest&,void*){return NativeGeometryPending;};
+    ProcessActorGeometry(42,999,Bodies(200),pending,nullptr,&deferred);
+    assert(api->CancelRequest(c,request)==PLANCK_BUSY&&api->ReleaseLease(c,request)==PLANCK_BUSY);
+    assert(api->ReleaseClient(c)==PLANCK_BUSY); // Closing cannot drop an admitted native request.
+    const auto competing=Client("geometry.competing");PlanckToken competingRequest=999;
+    assert(api->RequestActorGeometry(competing,&q,&competingRequest)==PLANCK_CONFLICT&&competingRequest==0);
+    assert(api->ReleaseClient(competing)==PLANCK_OK);
+    Reset();assert(api->ReleaseClient(c)==PLANCK_OK);
+    SetGeometryExecutorAvailable(false);
+}
+PlanckStatus ResolveTest(PlanckToken c,PlanckToken lease,const PlanckEndpoint& e,PlanckEndpointVisitor visitor,void* context){
+    PlanckNativeEndpoint n{};n.size=sizeof(n);n.rigidBody=100;n.world=888;n.endpoint=e;n.worldRotation[3]=1;
+    return VisitResolvedEndpoint(c,lease,999,100,777,n,visitor,context);
+}
+void PhysicalBridge(){
+    Reset();Publish();auto c=Client("native.bridge");auto body=Copy(c);PlanckEndpoint e{sizeof(e)};
+    PlanckEndpointQuery q{sizeof(q),0,body.body,{0,0,.2f},0};
+    assert(api->AcquireAttachmentEndpoint(c,&q,&e)==PLANCK_OK);
+    const auto* bridge=GetPhysicalInteropAPI();assert(bridge->version==1&&bridge->size==16);
+    auto visit=+[](const PlanckNativeEndpoint* n,void* value)->PlanckStatus{
+        assert(n->rigidBody==100&&n->world==888&&n->endpoint.localPoint.z==.2f&&n->sample);
+        ++*static_cast<unsigned*>(value);return PLANCK_OK;
+    };
+    unsigned calls=0;InstallNativeEndpointResolver(nullptr);
+    assert(bridge->WithAttachmentEndpoint(c,e.lease,visit,&calls)==PLANCK_UNSUPPORTED);
+    InstallNativeEndpointResolver(ResolveTest);
+    assert(bridge->WithAttachmentEndpoint(c,e.lease,visit,&calls)==PLANCK_OK&&calls==1);
+    auto release=+[](const PlanckNativeEndpoint*,void* value)->PlanckStatus{
+        auto* pair=static_cast<PlanckToken*>(value);assert(api->ReleaseLease(pair[0],pair[1])==PLANCK_BUSY);
+        assert(api->ReleaseClient(pair[0])==PLANCK_BUSY);return PLANCK_OK;
+    };
+    PlanckToken pair[2]{c,e.lease};assert(bridge->WithAttachmentEndpoint(c,e.lease,release,pair)==PLANCK_OK);
     assert(api->ReleaseClient(c)==PLANCK_OK);
+    c=Client("native.bridge.stale");assert(api->AcquireAttachmentEndpoint(c,&q,&e)==PLANCK_OK);
+    Publish(200);assert(bridge->WithAttachmentEndpoint(c,e.lease,visit,&calls)==PLANCK_STALE&&calls==1);
+    assert(api->ReleaseClient(c)==PLANCK_OK);InstallNativeEndpointResolver(nullptr);
 }
 void PLANCK_CALL InvalidatePolicy(const PlanckHitSnapshot*,PlanckHitDecision*,void*){InvalidateActor(42);}
 void InvalidationDuringPolicy(){
@@ -123,4 +179,4 @@ void InvalidationDuringPolicy(){
     assert(api->ReleaseClient(c)==PLANCK_OK);
 }
 
-int main(){Lifecycle();CoherentSnapshotsAndLoading();HitPolicies();Drainage();GeometryRequests();InvalidationDuringPolicy();std::cout<<"PASS PLANCK production core, C consumer, lifecycle, coherent snapshots/loading, hit gates, geometry fail-closed, cancellation interleavings and callback drainage\n";}
+int main(){Lifecycle();CoherentSnapshotsAndLoading();HitPolicies();Drainage();GeometryRequests();PhysicalBridge();InvalidationDuringPolicy();std::cout<<"PASS PLANCK production core, C consumer, lifecycle, coherent snapshots/loading, hit gates, geometry commitments, native endpoint bridge, cancellation interleavings and callback drainage\n";}

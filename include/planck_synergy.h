@@ -87,8 +87,10 @@ typedef void (PLANCK_CALL *PlanckEventCallback)(const PlanckEvent*, void*);
 typedef void (PLANCK_CALL *PlanckHitPolicyCallback)(const PlanckHitSnapshot*, PlanckHitDecision*, void*);
 typedef struct PlanckGeometryRequest {
     uint32_t size, reserved; PlanckBodyRef body; uint64_t expectedRevision;
-    /* Reserved proposal shape. Geometry capability is currently absent; the
-     * request/result/cancel entries return UNSUPPORTED and perform no mutation. */
+    /* Body-local meters. Direct native capsules only; positive radius <=10m.
+     * Accepted work is applied by PLANCK at its safe graph/world phase. A
+     * completed change persists until another proposal/body replacement;
+     * releasing its request token does not roll back applied geometry. */
     PlanckVec3 capsuleA, capsuleB; float radius; uint32_t reserved2;
 } PlanckGeometryRequest;
 typedef struct PlanckRequestResult {

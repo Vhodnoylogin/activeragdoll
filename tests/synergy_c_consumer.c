@@ -1,7 +1,10 @@
 #include "planck_synergy.h"
+#include "planck_physical_interop.h"
 #include <assert.h>
 #include <stddef.h>
 #include <string.h>
+_Static_assert(sizeof(PlanckPhysicalInteropAPI)==16,"native bridge table");
+_Static_assert(sizeof(PlanckNativeEndpoint)==144,"native borrowed endpoint ABI");
 _Static_assert(sizeof(PlanckToken)==8,"64 bit handles");
 _Static_assert(sizeof(PlanckVec3)==12,"vector POD layout");
 _Static_assert(sizeof(PlanckActorRef)==24,"actor ABI");

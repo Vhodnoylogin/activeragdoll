@@ -49,8 +49,11 @@
 #include "synergy_runtime.h"
 
 std::atomic<uint64_t> g_synergyPhysicsTick{0};
+std::atomic<DWORD> g_synergyActorThread{0};
 PlanckVec3 SynergyVector(const NiPoint3& point) { return {point.x,point.y,point.z}; }
 void PublishSynergyActor(Actor* actor);
+PlanckStatus ResolveSynergyEndpoint(PlanckToken,PlanckToken,const PlanckEndpoint&,PlanckEndpointVisitor,void*);
+void RetireSynergyGeometry(uintptr_t);
 
 
 // SKSE globals
@@ -2561,9 +2564,11 @@ struct PhysicsListener :
 
     virtual void entityRemovedCallback(hkpEntity *entity) override {
         PlanckSynergy::InvalidateBody(reinterpret_cast<uintptr_t>(entity));
+        RetireSynergyGeometry(reinterpret_cast<uintptr_t>(entity));
     }
     virtual void entityDeletedCallback(hkpEntity *entity) override {
         PlanckSynergy::InvalidateBody(reinterpret_cast<uintptr_t>(entity));
+        RetireSynergyGeometry(reinterpret_cast<uintptr_t>(entity));
     }
 
     bhkWorld *m_world = nullptr;
@@ -4189,8 +4194,98 @@ void ResetObjects()
 
 double g_worldChangedTime = 0.0;
 
+// Engine-created wrapper ownership is retained while a live rigid body uses
+// its capsule. No capsule is byte-copied and no shared authored shape is edited.
+struct SynergyGeometryShape {
+    PlanckToken requestId=0;
+    NiPointer<bhkShape> wrapper;
+    RE::hkRefPtr<hkpRigidBody> body;
+    PlanckGeometryRequest proposal{};
+    std::shared_ptr<SynergyGeometryShape> previous;
+};
+std::mutex g_synergyGeometryLock;
+std::map<uintptr_t,std::shared_ptr<SynergyGeometryShape>> g_synergyGeometryShapes;
+
+void RetireSynergyGeometry(uintptr_t identity)
+{
+    std::shared_ptr<SynergyGeometryShape> retired;
+    {
+        std::lock_guard guard(g_synergyGeometryLock);
+        auto it=g_synergyGeometryShapes.find(identity);if(it==g_synergyGeometryShapes.end())return;
+        retired=std::move(it->second);g_synergyGeometryShapes.erase(it);
+        // The callback owns the removed entity's physics lifetime. Its body can
+        // retain the native shape after the Ni wrapper retires; remove the
+        // back-pointer first so it cannot become a dangling wrapper address.
+        for(auto current=retired;current;current=current->previous)
+            if(current->wrapper&&current->wrapper->shape&&
+                current->wrapper->shape->m_userData==reinterpret_cast<uintptr_t>(static_cast<bhkShape*>(current->wrapper)))
+                current->wrapper->shape->m_userData=0;
+    }
+    // Reference release can destroy engine objects; do it outside our mutex.
+}
+
+PlanckStatus ApplySynergyCapsule(PlanckToken requestId,const PlanckSynergy::BodySample& sample,
+    const PlanckGeometryRequest& proposal,void* context)
+{
+    auto* world=static_cast<bhkWorld*>(context);
+    auto* body=reinterpret_cast<hkpRigidBody*>(sample.identity);
+    // The address came from this pass's live graph, never a queued work item.
+    if(!world||!world->world||!body||body->getWorld()!=world->world.val())return PLANCK_STALE;
+    {
+        std::lock_guard guard(g_synergyGeometryLock);auto it=g_synergyGeometryShapes.find(sample.identity);
+        if(it!=g_synergyGeometryShapes.end()&&it->second->requestId==requestId&&
+            it->second->proposal.expectedRevision==proposal.expectedRevision&&
+            it->second->proposal.body.bodyGeneration==proposal.body.bodyGeneration){
+            if(body->getCollidable()->m_shape!=it->second->wrapper->shape.val())return PlanckSynergy::NativeGeometryPending;
+            if(auto previous=it->second->previous;previous&&previous->wrapper&&previous->wrapper->shape&&
+                previous->wrapper->shape->m_userData==reinterpret_cast<uintptr_t>(static_cast<bhkShape*>(previous->wrapper)))
+                previous->wrapper->shape->m_userData=0;
+            it->second->previous.reset();return PLANCK_OK;
+        }
+    }
+    if(world->world->areCriticalOperationsLocked())return PLANCK_BUSY;
+    auto* source=DYNAMIC_CAST(body->getCollidable()->m_shape,hkpShape,hkpCapsuleShape);
+    if(!source||!source->m_userData)return PLANCK_UNSUPPORTED;
+    auto* sourceWrapper=reinterpret_cast<bhkShape*>(source->m_userData);
+    if(sourceWrapper->shape.val()!=source)return PLANCK_STALE;
+    NiCloningProcess process;
+    NiPointer<bhkShape> wrapper=static_cast<bhkShape*>(NiObject_Clone(sourceWrapper,&process));
+    if(!wrapper||static_cast<bhkShape*>(wrapper)==sourceWrapper||!wrapper->shape||wrapper->shape.val()==source)return PLANCK_UNSUPPORTED;
+    auto* capsule=DYNAMIC_CAST(wrapper->shape.val(),hkpShape,hkpCapsuleShape);
+    if(!capsule)return PLANCK_UNSUPPORTED;
+    capsule->m_radius=proposal.radius;
+    capsule->setVertex(0,NiPointToHkVector({proposal.capsuleA.x,proposal.capsuleA.y,proposal.capsuleA.z}));
+    capsule->setVertex(1,NiPointToHkVector({proposal.capsuleB.x,proposal.capsuleB.y,proposal.capsuleB.z}));
+    capsule->m_userData=reinterpret_cast<uintptr_t>(static_cast<bhkShape*>(wrapper));
+    auto next=std::make_shared<SynergyGeometryShape>();next->requestId=requestId;next->wrapper=wrapper;next->body=body;next->proposal=proposal;
+    std::shared_ptr<SynergyGeometryShape> previous;
+    {
+        std::lock_guard guard(g_synergyGeometryLock);
+        auto it=g_synergyGeometryShapes.find(sample.identity);
+        if(it==g_synergyGeometryShapes.end()&&g_synergyGeometryShapes.size()>=512)return PLANCK_LIMIT;
+        if(it!=g_synergyGeometryShapes.end())previous=it->second;
+        next->previous=previous;
+        g_synergyGeometryShapes[sample.identity]=next;
+    }
+    // Under world write ownership and with no critical operation lock, Havok
+    // replaces the shape and refreshes its broadphase/agent cache immediately.
+    // It does not recompute mass/inertia: PPB's geometry proposal owns fitting.
+    body->setShape(capsule);
+    if(body->getCollidable()->m_shape!=capsule){
+        // Retain the wrapper even if the engine deferred the replacement. The
+        // request remains pending; an observation must confirm actual adoption.
+        return PlanckSynergy::NativeGeometryPending;
+    }
+    if(previous&&previous->wrapper&&previous->wrapper->shape&&
+        previous->wrapper->shape->m_userData==reinterpret_cast<uintptr_t>(static_cast<bhkShape*>(previous->wrapper)))
+        previous->wrapper->shape->m_userData=0;
+    next->previous.reset();
+    return PLANCK_OK;
+}
+
 void PublishSynergyActor(Actor* actor)
 {
+    g_synergyActorThread.store(GetCurrentThreadId());
     PlanckSynergy::DeferredEvents events;
     BSAnimationGraphManagerPtr graphManager;
     const UInt32 handle=GetOrCreateRefrHandle(actor);
@@ -4207,7 +4302,7 @@ void PublishSynergyActor(Actor* actor)
         if (!world || !world->world) {
             PlanckSynergy::InvalidateActor(handle,&events);
         } else {
-            BSReadLocker worldLock(&world->worldLock);
+            BSWriteLocker worldLock(&world->worldLock);
             std::vector<PlanckSynergy::BodySample> samples;
             for (UInt32 graphIndex=0; graphIndex<graphManager.ptr->graphs.size; ++graphIndex) {
                 BShkbAnimationGraph* graph=graphManager.ptr->graphs.GetData()[graphIndex].ptr;
@@ -4238,14 +4333,54 @@ void PublishSynergyActor(Actor* actor)
                     samples.push_back(sample);
                 }
             }
-            // Stored native identities are comparison keys only. Geometry has no
-            // advertised executor and cannot resolve/dereference a queued key.
             PlanckSynergy::PublishActor(handle,reinterpret_cast<uintptr_t>(actor->GetNiNode()),
                 Actor_IsInRagdollState(actor),*g_currentFrameCounter,g_synergyPhysicsTick.load(),g_currentFrameTime,samples,&events);
+            PlanckSynergy::ProcessActorGeometry(handle,reinterpret_cast<uintptr_t>(actor->GetNiNode()),
+                samples,ApplySynergyCapsule,static_cast<bhkWorld*>(world),&events);
         }
     }
     // No client callback runs while our graph/world acquisition is held.
     PlanckSynergy::DispatchEvents(events);
+}
+
+PlanckStatus ResolveSynergyEndpoint(PlanckToken owner,PlanckToken lease,const PlanckEndpoint& endpoint,
+    PlanckEndpointVisitor visitor,void* context)
+{
+    // Endpoint calls are deliberately synchronous and never look up engine
+    // objects from an arbitrary worker/controller callback.
+    if(!g_synergyActorThread.load()||g_synergyActorThread.load()!=GetCurrentThreadId())return PLANCK_BUSY;
+    NiPointer<TESObjectREFR> reference;
+    UInt32 handle=endpoint.body.actor.handle;
+    if(!LookupREFRByHandle(handle,reference))return PLANCK_STALE;
+    Actor* actor=DYNAMIC_CAST(reference,TESObjectREFR,Actor);
+    if(!actor)return PLANCK_STALE;
+    BSAnimationGraphManagerPtr manager;
+    if(!GetAnimationGraphManager(actor,manager))return PLANCK_STALE;
+    SimpleLocker graphLock(&manager.ptr->updateLock);
+    NiPointer<bhkWorld> world;
+    if(actor->parentCell)world=GetHavokWorldFromCell(actor->parentCell);
+    if(!world||!world->world)return PLANCK_STALE;
+    BSWriteLocker worldLock(&world->worldLock);
+    uint32_t index=0;
+    for(UInt32 graphIndex=0;graphIndex<manager.ptr->graphs.size;++graphIndex){
+        BShkbAnimationGraph* graph=manager.ptr->graphs.GetData()[graphIndex].ptr;
+        hkbRagdollDriver* driver=graph?graph->character.ragdollDriver:nullptr;
+        if(!driver||!driver->ragdoll||!GetActiveRagdollFromDriver(driver))continue;
+        hkaRagdollInstance* ragdoll=driver->ragdoll;
+        if(ragdoll->getWorld()!=world->world.val())continue;
+        for(int i=0;i<ragdoll->m_rigidBodies.getSize();++i){
+            hkpRigidBody* body=ragdoll->m_rigidBodies[i];
+            if(!body||body->getWorld()!=world->world.val())continue;
+            if(index++!=endpoint.body.index)continue;
+            PlanckNativeEndpoint native{};native.size=sizeof(native);native.phase=PLANCK_PHASE_MAIN;
+            native.rigidBody=reinterpret_cast<uintptr_t>(body);native.world=reinterpret_cast<uintptr_t>(world->world.val());
+            native.worldPosition=SynergyVector(HkVectorToNiPoint(body->getPosition()));
+            for(int j=0;j<4;++j)native.worldRotation[j]=body->getRotation().m_vec(j);
+            return PlanckSynergy::VisitResolvedEndpoint(owner,lease,reinterpret_cast<uintptr_t>(actor->GetNiNode()),
+                reinterpret_cast<uintptr_t>(body),reinterpret_cast<uintptr_t>(ragdoll),native,visitor,context);
+        }
+    }
+    return PLANCK_STALE;
 }
 
 
@@ -8550,6 +8685,8 @@ extern "C" {
     bool SKSEPlugin_Load(const SKSEInterface *skse)
     {	// Called by SKSE to load this plugin
         _MESSAGE("PLANCK loaded");
+        PlanckSynergy::InstallNativeEndpointResolver(ResolveSynergyEndpoint);
+        PlanckSynergy::SetGeometryExecutorAvailable(true);
 
         if (Config::ReadConfigOptions()) {
             _MESSAGE("Successfully read config parameters");

@@ -42,10 +42,10 @@ actual production `src/synergy_runtime.cpp`, a C11 consumer and C++ checks with
 warnings treated as errors. It covers owner isolation, generations/reset/loading,
 concurrent coherent snapshots, endpoint leases, callback self-removal/client close
 and concurrent drainage, scoped hit veto/scale decisions, immutable results and
-terminal cancellation during 300 target-invalidation cycles and unsupported geometry requests.
+terminal cancellation during 300 target-invalidation cycles, capsule geometry request commitments and a separate native-provider endpoint bridge.
 An additional actual-source fixture extracts the native clutter hit method and
-actor publisher, checking veto/scale before engine commitment and publication
+actor publisher, live endpoint resolver and native geometry adapter, checking veto/scale before engine commitment and publication
 under graph/world ownership, physical destruction at world unlock without stale
-republication, and publication callbacks after lock release. These use explicit fake engine objects; they do
+republication, publication callbacks after lock release, independent cloned capsules, actual deferred adoption, and callback-scoped endpoint resolution. These use explicit fake engine objects; they do
 not qualify native Havok layouts, hook installation or game behavior. Read the
 [ABI/phase contract](../docs/synergy-api.md) for the exact delivered boundary.

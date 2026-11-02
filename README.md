@@ -8,21 +8,19 @@
 
 This fork's intended direction follows the concept maintained only in Body Pouches. The source API below implements a bounded part of PLANCK's role; the remaining contracts and qualification limits are explicit. This is not an agreement with the framework authors or a game-qualified release.
 
-The [native build prerequisites](docs/native-build-prerequisites.md) distinguish the available SKSE/toolchain from nonportable project paths and the remaining compatible Havok headers.
+The [native build procedure](docs/native-build-prerequisites.md) builds the complete DLL from external SDK inputs without deployment hooks and verifies its binding metadata. Native linking now succeeds; game qualification remains pending.
 
 This mod is also complicated.
 
 The development branch includes bounded lifecycle repairs for temporary NPC
 movement/look-at restrictions and nested hit-event context. Run their source-backed
 standalone checks with `python tests/run_lifecycle_regressions.py --build-dir <external-directory>`.
-The [regression fixture](tests/README.md) uses a fake engine; the native plugin
-remains unbuilt and untested in game.
+The [regression fixture](tests/README.md) uses a fake engine; the separately linked native plugin remains untested in game.
 
 `development` also implements an additive [plain-C cooperation API](docs/synergy-api.md)
 with copied actor/body samples, validated endpoint descriptors, owned policies and
-removable callbacks, precommit physical-hit decisions. Geometry proposals currently return
-`UNSUPPORTED`; their capability is absent after review exposed an unsafe native
-lifetime handoff. Revision 001 is unchanged. The actual service and selected native adapters
+removable callbacks, precommit physical-hit decisions, safe-phase cloned capsule geometry adoption and
+a separate scoped native endpoint bridge for HIGGS. Revision 001 is unchanged. The actual service and selected native adapters
 have standalone CPU fixtures; HIGGS constraint transport and native/game qualification
 remain outstanding. The branch merges upstream 0.8.2 at `aed524a`.
 

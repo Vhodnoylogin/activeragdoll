@@ -8,7 +8,11 @@
 #include <functional>
 #include <set>
 #include <vector>
-using UInt32=uint32_t;
+#include <mutex>
+#include <memory>
+using UInt32=uint32_t;using DWORD=uint32_t;
+thread_local DWORD fakeThread=1;DWORD GetCurrentThreadId(){return fakeThread;}
+std::atomic<DWORD> g_synergyActorThread{0};
 struct NiPoint3 {
     float x=0,y=0,z=0;
     NiPoint3 operator*(float n)const{return{x*n,y*n,z*n};}
@@ -21,24 +25,28 @@ NiPoint3 NiPointToHkVector(NiPoint3 v){return v;}
 float inverseScale=1;float* g_inverseHavokWorldScale=&inverseScale;
 float VectorLength(NiPoint3 v){return v.x;}
 template<class T>struct Pointer {
-    T* p=nullptr;T* val()const{return p;}T* operator->()const{return p;}operator T*()const{return p;}
+    T* p=nullptr;Pointer()=default;Pointer(T* value):p(value){}
+    Pointer& operator=(T* value){p=value;return *this;}
+    T* val()const{return p;}T* operator->()const{return p;}operator T*()const{return p;}
 };
 template<class T>using NiPointer=Pointer<T>;
+namespace RE {template<class T>using hkRefPtr=Pointer<T>;}
 struct TESForm {uint32_t formID=1;};
-struct TESObjectREFR {TESForm* baseForm=nullptr;uint32_t handle=1;};
+struct TESObjectREFR {virtual ~TESObjectREFR()=default;TESObjectREFR(TESForm* form=nullptr,uint32_t h=1):baseForm(form),handle(h){}TESForm* baseForm=nullptr;uint32_t handle=1;};
 struct TESObjectCELL;
 struct Actor:TESObjectREFR {TESObjectCELL* parentCell=nullptr;int root=0;void* GetNiNode(){return &root;}};
 uint32_t GetOrCreateRefrHandle(TESObjectREFR* r){return r->handle;}
 struct hkpShape {virtual ~hkpShape()=default;uintptr_t m_userData=0;};
 struct hkpCapsuleShape:hkpShape {
-    float m_radius=.1f;int references=2;NiPoint3 vertices[2]{{0,0,0},{0,0,.5f}};
+    struct Vertex {float x,y,z,w;operator NiPoint3()const{return {x,y,z};}};
+    float m_radius=.1f;int references=2;Vertex vertices[2]{{0,0,0,.1f},{0,0,.5f,.1f}};
     int getReferenceCount()const{return references;}
-    NiPoint3 getVertex(int i)const{return vertices[i];}
-    void setVertex(int i,NiPoint3 v){vertices[i]=v;}
+    Vertex getVertex(int i)const{return vertices[i];}
+    void setVertex(int i,NiPoint3 v){vertices[i]={v.x,v.y,v.z,m_radius};}
 };
 struct bhkShape {Pointer<hkpShape> shape;};
 struct Collidable {hkpShape* m_shape=nullptr;};
-struct hkpWorld {};
+struct hkpWorld {int critical=0;int areCriticalOperationsLocked()const{return critical;}};
 struct bhkWorld {Pointer<hkpWorld> world;int worldLock=0;};
 bool graphHeld=false,worldHeld=false;
 std::function<void()> afterWorldUnlock;
@@ -46,16 +54,18 @@ struct SimpleLocker {
     explicit SimpleLocker(int*){assert(!graphHeld&&!worldHeld);graphHeld=true;}
     ~SimpleLocker(){assert(graphHeld&&!worldHeld);graphHeld=false;}
 };
-struct BSReadLocker {
-    explicit BSReadLocker(int*){assert(graphHeld&&!worldHeld);worldHeld=true;}
-    ~BSReadLocker(){worldHeld=false;if(afterWorldUnlock){auto callback=std::move(afterWorldUnlock);afterWorldUnlock={};callback();}}
+struct BSWriteLocker {
+    explicit BSWriteLocker(int*){assert(graphHeld&&!worldHeld);worldHeld=true;}
+    ~BSWriteLocker(){worldHeld=false;if(afterWorldUnlock){auto callback=std::move(afterWorldUnlock);afterWorldUnlock={};callback();}}
 };
-#define DYNAMIC_CAST(value,from,to) dynamic_cast<to*>(value)
+#define DYNAMIC_CAST(value,from,to) dynamic_cast<to*>(static_cast<from*>(value))
 std::set<const void*> livingBodies;
 struct hkpRigidBody {
     hkpRigidBody(){livingBodies.insert(this);}
     ~hkpRigidBody(){livingBodies.erase(this);}
     void Check()const{assert(livingBodies.count(this)&&worldHeld);}
+    bool postpone=false;hkpShape* queuedShape=nullptr;
+    void setShape(hkpShape* value){Check();if(postpone)queuedShape=value;else collidable.m_shape=value;}
     hkpWorld* world=nullptr;Collidable collidable;NiPoint3 position{},velocity{10,0,0};hkQuaternion rotation;
     hkpWorld* getWorld(){Check();return world;}Collidable* getCollidable(){return &collidable;}
     NiPoint3 getPosition(){Check();return position;}hkQuaternion getRotation(){Check();return rotation;}
@@ -78,12 +88,14 @@ struct GraphPointer {BShkbAnimationGraph* ptr=nullptr;};
 struct Graphs {uint32_t size=1;GraphPointer data[1];GraphPointer* GetData(){return data;}};
 struct BSAnimationGraphManager {int updateLock=0;Graphs graphs;};
 struct BSAnimationGraphManagerPtr {BSAnimationGraphManager* ptr=nullptr;};
-BSAnimationGraphManager manager;
+BSAnimationGraphManager fakeManager;
 struct TESObjectCELL {bhkWorld* world;};
-bool GetAnimationGraphManager(Actor*,BSAnimationGraphManagerPtr& result){result.ptr=&manager;return true;}
+bool GetAnimationGraphManager(Actor*,BSAnimationGraphManagerPtr& result){result.ptr=&fakeManager;return true;}
 NiPointer<bhkWorld> GetHavokWorldFromCell(TESObjectCELL* cell){return{cell->world};}
 bool GetActiveRagdollFromDriver(hkbRagdollDriver*){return true;}
 bool Actor_IsInRagdollState(Actor*){return false;}
+Actor* resolvedActor=nullptr;
+bool LookupREFRByHandle(UInt32& handle,NiPointer<TESObjectREFR>& out){if(!resolvedActor||resolvedActor->handle!=handle)return false;out=resolvedActor;return true;}
 struct bhkCharacterController {struct CollisionEvent {bhkRigidBody* body;NiPoint3 position,normal,bodyVelocity;};};
 struct HitData {
     NiPoint3 hitPosition;uint32_t aggressor=0,flags=0;
@@ -107,7 +119,15 @@ namespace Config {struct Options {bool showCollisionDamageHitFx=true;float physi
 #define _DMESSAGE(...) ((void)0)
 uint32_t frame=1;uint32_t* g_currentFrameCounter=&frame;
 std::atomic<uint64_t> g_synergyPhysicsTick{1};double g_currentFrameTime=1.;
+struct NiCloningProcess {};
+bhkShape* NiObject_Clone(bhkShape* source,NiCloningProcess*){
+    auto* old=dynamic_cast<hkpCapsuleShape*>(source->shape.val());assert(old);
+    auto* copy=new hkpCapsuleShape(*old);auto* wrapper=new bhkShape{{copy}};
+    copy->m_userData=reinterpret_cast<uintptr_t>(wrapper);return wrapper;
+}
+/*@GEOMETRY_NATIVE@*/
 /*@ACTOR_PUBLICATION@*/
+/*@ENDPOINT_RESOLVER@*/
 struct Listener {
     uint32_t lastPhysicsDamageFormId=0;
     std::map<std::pair<Actor*,hkpRigidBody*>,double> physicsHitCooldownTargets;
@@ -131,34 +151,57 @@ int main(){
     assert(api->ReleaseClient(client)==PLANCK_OK);
     PlanckSynergy::Reset();
     assert(api->RegisterClient(&id,&client)==PLANCK_OK);
-    assert(!(api->capabilities&PLANCK_CAP_CAPSULE_GEOMETRY));
+    PlanckSynergy::SetGeometryExecutorAvailable(true);assert(api->capabilities&PLANCK_CAP_CAPSULE_GEOMETRY);
     hkpWorld world;bhkWorld bw{{&world}};TESObjectCELL cell{&bw};target.parentCell=&cell;
     auto* live=new hkpRigidBody;live->world=&world;
-    hkpCapsuleShape shape;live->collidable.m_shape=&shape;
+    hkpCapsuleShape shape;bhkShape sourceShape{{&shape}};shape.m_userData=reinterpret_cast<uintptr_t>(&sourceShape);live->collidable.m_shape=&shape;
     Skeleton skeleton;skeleton.m_bones.push_back({});
     hkaRagdollInstance ragdoll;ragdoll.world=&world;ragdoll.m_skeleton=&skeleton;ragdoll.m_rigidBodies.push_back(live);
-    hkbRagdollDriver driver{&ragdoll};BShkbAnimationGraph graph;graph.character.ragdollDriver=&driver;manager.graphs.data[0].ptr=&graph;
+    hkbRagdollDriver driver{&ragdoll};BShkbAnimationGraph graph;graph.character.ragdollDriver=&driver;fakeManager.graphs.data[0].ptr=&graph;
     unsigned published=0;PlanckToken subscription=0;
     auto observer=+[](const PlanckEvent* e,void* p){if(e->phase==PLANCK_PHASE_MAIN){assert(!graphHeld&&!worldHeld);++*static_cast<unsigned*>(p);}};
     assert(api->Subscribe(client,PLANCK_ACTOR_CHANGED,observer,&published,&subscription)==PLANCK_OK);
+    PublishSynergyActor(&target);resolvedActor=&target;
+    PlanckSynergy::InstallNativeEndpointResolver(ResolveSynergyEndpoint);
+    PlanckActorPhysics a{sizeof(a)};PlanckBodyPhysics b{sizeof(b)};uint32_t needed=0;
+    assert(api->CopyActorPhysics(client,42,&a,&b,1,&needed)==PLANCK_OK);
+    PlanckEndpointQuery query{sizeof(query),0,b.body,{0,0,.2f},0};PlanckEndpoint endpoint{sizeof(endpoint)};
+    assert(api->AcquireAttachmentEndpoint(client,&query,&endpoint)==PLANCK_OK);
+    auto visit=+[](const PlanckNativeEndpoint* n,void* p)->PlanckStatus{
+        assert(graphHeld&&worldHeld&&n->rigidBody==reinterpret_cast<uintptr_t>(p)&&n->endpoint.localPoint.z==.2f);
+        return PLANCK_OK;
+    };
+    fakeThread=2;assert(PlanckSynergy::GetPhysicalInteropAPI()->WithAttachmentEndpoint(client,endpoint.lease,visit,live)==PLANCK_BUSY);fakeThread=1;
+    assert(PlanckSynergy::GetPhysicalInteropAPI()->WithAttachmentEndpoint(client,endpoint.lease,visit,live)==PLANCK_OK);
+    PlanckGeometryRequest g{sizeof(g),0,b.body,b.geometryRevision,{0,0,0},{0,0,.7f},.15f,0};PlanckToken request=0;
+    assert(api->RequestActorGeometry(client,&g,&request)==PLANCK_OK);
+    world.critical=1;PublishSynergyActor(&target);
+    PlanckRequestResult result{sizeof(result)};assert(api->GetRequestResult(client,request,&result)==PLANCK_OK&&result.stage==PLANCK_REQUEST_ACCEPTED);
+    assert(shape.m_radius==.1f);world.critical=0;live->postpone=true;PublishSynergyActor(&target);
+    assert(api->CancelRequest(client,request)==PLANCK_BUSY&&live->queuedShape);
+    assert(shape.m_radius==.1f);live->collidable.m_shape=live->queuedShape;live->queuedShape=nullptr;live->postpone=false;
+    PublishSynergyActor(&target);assert(api->GetRequestResult(client,request,&result)==PLANCK_OK&&result.stage==PLANCK_REQUEST_COMPLETED&&result.geometryRevision==2);
+    auto* adopted=dynamic_cast<hkpCapsuleShape*>(live->collidable.m_shape);assert(adopted&&adopted!=&shape&&adopted->m_radius==.15f&&shape.m_radius==.1f);
+    assert(adopted->getVertex(1).z==.7f&&shape.getVertex(1).z==.5f);
+    assert(adopted->getVertex(0).w==.15f&&adopted->getVertex(1).w==.15f);
+    assert(api->ReleaseLease(client,request)==PLANCK_OK);
     const auto address=reinterpret_cast<uintptr_t>(live);
     afterWorldUnlock=[&]{
         // The registry publication MUST already exist before releasing world ownership.
         PlanckActorPhysics actor{sizeof(actor)};PlanckBodyPhysics copied{sizeof(copied)};uint32_t count=0;
         assert(api->CopyActorPhysics(client,42,&actor,&copied,1,&count)==PLANCK_OK&&count==1);
-        PlanckSynergy::InvalidateBody(address);delete live;live=nullptr;ragdoll.m_rigidBodies.clear();
+        PlanckSynergy::InvalidateBody(address);RetireSynergyGeometry(address);assert(!adopted->m_userData);delete live;live=nullptr;ragdoll.m_rigidBodies.clear();
     };
     PublishSynergyActor(&target);
-    assert(!live&&!livingBodies.count(reinterpret_cast<void*>(address))&&published==1);
+    assert(!live&&!livingBodies.count(reinterpret_cast<void*>(address))&&published==2);
     PlanckActorPhysics actor{sizeof(actor)};uint32_t count=0;
     assert(api->CopyActorPhysics(client,42,&actor,nullptr,0,&count)==PLANCK_NOT_FOUND);
     // A fresh object can reuse an old numerical address only after invalidation;
     // publication never resurrects the destroyed sample after its unlock callback.
     PublishSynergyActor(&target);
     assert(api->CopyActorPhysics(client,42,&actor,nullptr,0,&count)==PLANCK_NOT_FOUND);
-    PlanckGeometryRequest request{sizeof(request)};PlanckToken result=999;
-    assert(api->RequestActorGeometry(client,&request,&result)==PLANCK_UNSUPPORTED&&result==0);
+    g.body=b.body;request=999;assert(api->RequestActorGeometry(client,&g,&request)==PLANCK_STALE&&request==0);
     assert(api->ReleaseClient(client)==PLANCK_OK);
-    std::cout<<"PASS actual-source clutter veto/reduction/commit and atomic publication/destruction interleaving, deferred observers, no geometry executor\n";
+    std::cout<<"PASS actual-source clutter veto/reduction/commit and atomic publication/destruction interleaving, deferred observers, private cloned capsule adoption/deferred confirmation/removal\n";
 
 }

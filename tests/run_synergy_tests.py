@@ -25,7 +25,7 @@ def main():
     environment=helper.msvc_environment() if os.name=='nt' else dict(os.environ)
     compiler=shutil.which('cl' if os.name=='nt' else 'g++',path=environment.get('PATH'))
     if not compiler: raise RuntimeError('C/C++ compiler unavailable')
-    sources=[ROOT/p for p in ('include/planck_synergy.h','include/synergy_runtime.h','src/synergy_runtime.cpp',
+    sources=[ROOT/p for p in ('include/planck_synergy.h','include/planck_physical_interop.h','include/synergy_runtime.h','src/synergy_runtime.cpp',
         'tests/synergy_c_consumer.c','tests/synergy_runtime_tests.cpp','tests/synergy_native_fixture.cpp.in',
         'tests/run_synergy_tests.py','src/main.cpp','src/pluginapi.cpp')]
     expected=json.loads((ROOT/'tests/official001-sha256.json').read_text())
@@ -52,9 +52,11 @@ def main():
     native=(ROOT/'tests/synergy_native_fixture.cpp.in').read_text()
     main=(ROOT/'src/main.cpp').read_text()
     for marker,signature in [('ACTOR_PUBLICATION','void PublishSynergyActor(Actor* actor)\n{'),
+        ('ENDPOINT_RESOLVER','PlanckStatus ResolveSynergyEndpoint(PlanckToken owner,PlanckToken lease,const PlanckEndpoint& endpoint,\n    PlanckEndpointVisitor visitor,void* context)\n{'),
         ('CLUTTER_HIT','    void ApplyPhysicsDamage(')]:
         native=native.replace('/*@'+marker+'@*/',helper.extract_function(main,signature))
-    assert 'ApplySynergyGeometry' not in main and 'ProcessGeometry' not in main
+    begin=main.index('struct SynergyGeometryShape {');end=main.index('void PublishSynergyActor(Actor* actor)\n{',begin)
+    native=native.replace('/*@GEOMETRY_NATIVE@*/',main[begin:end])
     generated=output/'native_fixture.cpp';generated.write_text(native)
     manifest['nativeFixtureSha256']=hashlib.sha256(generated.read_bytes()).hexdigest()
     native_exe=output/('native_fixture.exe' if os.name=='nt' else 'native_fixture')
