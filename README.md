@@ -14,6 +14,8 @@ This mod is also complicated.
 
 The additive [scoped NPC drive policy](docs/drive-api.md) lets consumers block pivot loosening for a specific actor and request bounded controller gains/body weights. PLANCK applies and restores those inputs around its existing driver call, with copied observations and explicit ownership conflicts; consumers do not need a second ragdoll actuator for these operations. It does not implement PPB's complete pose pipeline.
 
+The separate [compound geometry API](docs/compound-geometry-api.md) copies existing list-child geometry and accepts atomic capsule-fitting proposals for one body. PLANCK clones and owns the physical replacement, preserving filters, disabled state, materials and cached bounds. PPB can retain fitting/anatomical policy without directly changing a shared NPC shape; actual PPB adoption and game qualification remain separate.
+
 The development branch includes bounded lifecycle repairs for temporary NPC
 movement/look-at restrictions and nested hit-event context. Run their source-backed
 standalone checks with `python tests/run_lifecycle_regressions.py --build-dir <external-directory>`.

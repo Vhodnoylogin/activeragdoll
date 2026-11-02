@@ -9,6 +9,7 @@
 
 #include <Physics/Collide/Shape/Convex/ConvexVertices/hkpConvexVerticesShape.h>
 #include <Physics/Collide/Shape/Convex/Capsule/hkpCapsuleShape.h>
+#include <Physics/Collide/Shape/Compound/Collection/List/hkpListShape.h>
 #include <Common/Base/Types/Geometry/hkStridedVertices.h>
 #include <Physics/Dynamics/Constraint/Bilateral/BallAndSocket/hkpBallAndSocketConstraintData.h>
 #include <Physics/ConstraintSolver/Simplex/hkpSimplexSolver.h>
@@ -4203,9 +4204,21 @@ struct SynergyGeometryShape {
     RE::hkRefPtr<hkpRigidBody> body;
     PlanckGeometryRequest proposal{};
     std::shared_ptr<SynergyGeometryShape> previous;
+    std::vector<NiPointer<bhkShape>> children;
 };
 std::mutex g_synergyGeometryLock;
 std::map<uintptr_t,std::shared_ptr<SynergyGeometryShape>> g_synergyGeometryShapes;
+
+void ClearSynergyShapeBackPointers(const std::shared_ptr<SynergyGeometryShape>& record)
+{
+    for(auto current=record;current;current=current->previous){
+        const auto clear=[](bhkShape* wrapper){
+            if(wrapper&&wrapper->shape&&wrapper->shape->m_userData==reinterpret_cast<uintptr_t>(wrapper))wrapper->shape->m_userData=0;
+        };
+        clear(current->wrapper);
+        for(const auto& child:current->children)clear(child);
+    }
+}
 
 void RetireSynergyGeometry(uintptr_t identity)
 {
@@ -4217,10 +4230,7 @@ void RetireSynergyGeometry(uintptr_t identity)
         // The callback owns the removed entity's physics lifetime. Its body can
         // retain the native shape after the Ni wrapper retires; remove the
         // back-pointer first so it cannot become a dangling wrapper address.
-        for(auto current=retired;current;current=current->previous)
-            if(current->wrapper&&current->wrapper->shape&&
-                current->wrapper->shape->m_userData==reinterpret_cast<uintptr_t>(static_cast<bhkShape*>(current->wrapper)))
-                current->wrapper->shape->m_userData=0;
+        ClearSynergyShapeBackPointers(retired);
     }
     // Reference release can destroy engine objects; do it outside our mutex.
 }
@@ -4238,9 +4248,7 @@ PlanckStatus ApplySynergyCapsule(PlanckToken requestId,const PlanckSynergy::Body
             it->second->proposal.expectedRevision==proposal.expectedRevision&&
             it->second->proposal.body.bodyGeneration==proposal.body.bodyGeneration){
             if(body->getCollidable()->m_shape!=it->second->wrapper->shape.val())return PlanckSynergy::NativeGeometryPending;
-            if(auto previous=it->second->previous;previous&&previous->wrapper&&previous->wrapper->shape&&
-                previous->wrapper->shape->m_userData==reinterpret_cast<uintptr_t>(static_cast<bhkShape*>(previous->wrapper)))
-                previous->wrapper->shape->m_userData=0;
+            ClearSynergyShapeBackPointers(it->second->previous);
             it->second->previous.reset();return PLANCK_OK;
         }
     }
@@ -4277,11 +4285,110 @@ PlanckStatus ApplySynergyCapsule(PlanckToken requestId,const PlanckSynergy::Body
         // request remains pending; an observation must confirm actual adoption.
         return PlanckSynergy::NativeGeometryPending;
     }
-    if(previous&&previous->wrapper&&previous->wrapper->shape&&
-        previous->wrapper->shape->m_userData==reinterpret_cast<uintptr_t>(static_cast<bhkShape*>(previous->wrapper)))
-        previous->wrapper->shape->m_userData=0;
+    ClearSynergyShapeBackPointers(previous);
     next->previous.reset();
     return PLANCK_OK;
+}
+
+void CaptureSynergyList(PlanckSynergy::BodySample& sample,hkpRigidBody* body)
+{
+    auto* list=DYNAMIC_CAST(body->getCollidable()->m_shape,hkpShape,hkpListShape);
+    if(!list||list->m_childInfo.getSize()<=0||list->m_childInfo.getSize()>256)return;
+    sample.listIdentity=reinterpret_cast<uintptr_t>(list);
+    sample.children.reserve(list->m_childInfo.getSize());
+    for(int i=0;i<list->m_childInfo.getSize();++i){
+        const auto& info=list->m_childInfo[i];
+        PlanckSynergy::ShapeChildSample child;child.identity=reinterpret_cast<uintptr_t>(info.m_shape);
+        child.state={sizeof(child.state),static_cast<uint32_t>(i),PLANCK_SHAPE_UNKNOWN,
+            uint32_t(list->isChildEnabled(i)!=0),info.m_collisionFilterInfo,0,{},{},0,0};
+        auto* capsule=DYNAMIC_CAST(const_cast<hkpShape*>(info.m_shape),hkpShape,hkpCapsuleShape);
+        if(capsule){
+            child.state.shapeKind=PLANCK_SHAPE_CAPSULE;
+            child.state.capsuleA=SynergyVector(HkVectorToNiPoint(capsule->getVertex(0)));
+            child.state.capsuleB=SynergyVector(HkVectorToNiPoint(capsule->getVertex(1)));
+            child.state.radius=capsule->m_radius;
+        }
+        sample.children.push_back(child);
+    }
+}
+
+PlanckStatus ApplySynergyCompound(PlanckToken requestId,const PlanckSynergy::BodySample& sample,
+    const PlanckCompoundProposal& proposal,const std::vector<PlanckCapsuleEdit>& edits,void* context,
+    PlanckSynergy::BodySample* applied)
+{
+    auto* world=static_cast<bhkWorld*>(context);auto* body=reinterpret_cast<hkpRigidBody*>(sample.identity);
+    if(!applied||!world||!world->world||!body||body->getWorld()!=world->world.val())return PLANCK_STALE;
+    {
+        std::lock_guard guard(g_synergyGeometryLock);auto it=g_synergyGeometryShapes.find(sample.identity);
+        if(it!=g_synergyGeometryShapes.end()&&it->second->requestId==requestId&&
+            it->second->proposal.body.bodyGeneration==proposal.body.bodyGeneration&&it->second->proposal.expectedRevision==proposal.expectedRevision){
+            if(body->getCollidable()->m_shape!=it->second->wrapper->shape.val())return PlanckSynergy::NativeGeometryPending;
+            ClearSynergyShapeBackPointers(it->second->previous);it->second->previous.reset();
+            *applied=sample;applied->children.clear();CaptureSynergyList(*applied,body);return PLANCK_OK;
+        }
+    }
+    if(world->world->areCriticalOperationsLocked())return PLANCK_BUSY;
+    auto* source=DYNAMIC_CAST(body->getCollidable()->m_shape,hkpShape,hkpListShape);
+    if(!source||reinterpret_cast<uintptr_t>(source)!=sample.listIdentity||!source->m_userData||
+        source->m_childInfo.getSize()<=0||source->m_childInfo.getSize()>256)return PLANCK_UNSUPPORTED;
+    auto* sourceWrapper=reinterpret_cast<bhkShape*>(source->m_userData);
+    if(sourceWrapper->shape.val()!=source)return PLANCK_STALE;
+    NiCloningProcess process;NiPointer<bhkShape> wrapper=static_cast<bhkShape*>(NiObject_Clone(sourceWrapper,&process));
+    if(!wrapper||static_cast<bhkShape*>(wrapper)==sourceWrapper||!wrapper->shape||wrapper->shape.val()==source)return PLANCK_UNSUPPORTED;
+    auto* list=DYNAMIC_CAST(wrapper->shape.val(),hkpShape,hkpListShape);
+    if(!list||list->m_childInfo.getSize()!=source->m_childInfo.getSize()||list->m_childInfo.begin()==source->m_childInfo.begin())return PLANCK_UNSUPPORTED;
+    wrapper->materialId=sourceWrapper->materialId;wrapper->filterInfo=sourceWrapper->filterInfo;
+    auto next=std::make_shared<SynergyGeometryShape>();next->requestId=requestId;next->wrapper=wrapper;next->body=body;
+    next->proposal.body=proposal.body;next->proposal.expectedRevision=proposal.expectedRevision;
+    // Every child is independently cloned and retained. Version 1 edits existing
+    // capsule-only lists; unsupported topology never receives a partial write.
+    for(int i=0;i<source->m_childInfo.getSize();++i){
+        auto* old=DYNAMIC_CAST(const_cast<hkpShape*>(source->m_childInfo[i].m_shape),hkpShape,hkpCapsuleShape);
+        if(!old||!old->m_userData)return PLANCK_UNSUPPORTED;
+        auto* oldWrapper=reinterpret_cast<bhkShape*>(old->m_userData);if(oldWrapper->shape.val()!=old)return PLANCK_STALE;
+        NiPointer<bhkShape> child=static_cast<bhkShape*>(NiObject_Clone(oldWrapper,&process));
+        if(!child||static_cast<bhkShape*>(child)==oldWrapper||!child->shape)return PLANCK_UNSUPPORTED;
+        auto* capsule=DYNAMIC_CAST(child->shape.val(),hkpShape,hkpCapsuleShape);if(!capsule)return PLANCK_UNSUPPORTED;
+        for(const auto& info:source->m_childInfo)if(info.m_shape==capsule)return PLANCK_UNSUPPORTED;
+        for(const auto& retained:next->children)if(retained->shape.val()==capsule)return PLANCK_UNSUPPORTED;
+        child->materialId=oldWrapper->materialId;child->filterInfo=oldWrapper->filterInfo;
+        auto edit=std::find_if(edits.begin(),edits.end(),[&](const auto& value){return value.index==uint32_t(i);});
+        if(edit!=edits.end()){
+            capsule->m_radius=edit->radius;
+            capsule->setVertex(0,NiPointToHkVector({edit->capsuleA.x,edit->capsuleA.y,edit->capsuleA.z}));
+            capsule->setVertex(1,NiPointToHkVector({edit->capsuleB.x,edit->capsuleB.y,edit->capsuleB.z}));
+        }
+        capsule->m_userData=reinterpret_cast<uintptr_t>(static_cast<bhkShape*>(child));
+        auto& info=list->m_childInfo[i];capsule->addReference();if(info.m_shape)info.m_shape->removeReference();info.m_shape=capsule;
+        info.m_collisionFilterInfo=source->m_childInfo[i].m_collisionFilterInfo;
+        next->children.push_back(child);
+    }
+    list->m_flags=source->m_flags;list->m_numDisabledChildren=source->m_numDisabledChildren;
+    for(unsigned i=0;i<8;++i)list->m_enabledChildren[i]=source->m_enabledChildren[i];
+    // Rebuild conservative local bounds across ALL children, including disabled
+    // ones. The existing body setter refreshes broadphase and child-agent caches.
+    float lower[3]{INFINITY,INFINITY,INFINITY},upper[3]{-INFINITY,-INFINITY,-INFINITY};
+    for(const auto& retained:next->children){
+        auto* capsule=DYNAMIC_CAST(retained->shape.val(),hkpShape,hkpCapsuleShape);
+        for(int axis=0;axis<3;++axis){
+            lower[axis]=(std::min)(lower[axis],(std::min)(capsule->getVertex(0)(axis),capsule->getVertex(1)(axis))-capsule->m_radius);
+            upper[axis]=(std::max)(upper[axis],(std::max)(capsule->getVertex(0)(axis),capsule->getVertex(1)(axis))+capsule->m_radius);
+        }
+    }
+    for(int axis=0;axis<3;++axis)if(!std::isfinite(lower[axis])||!std::isfinite(upper[axis])||lower[axis]>upper[axis])return PLANCK_INVALID;
+    list->m_aabbCenter.set((lower[0]+upper[0])*.5f,(lower[1]+upper[1])*.5f,(lower[2]+upper[2])*.5f,0.f);
+    list->m_aabbHalfExtents.set((upper[0]-lower[0])*.5f,(upper[1]-lower[1])*.5f,(upper[2]-lower[2])*.5f,0.f);
+    list->m_userData=reinterpret_cast<uintptr_t>(static_cast<bhkShape*>(wrapper));
+    {
+        std::lock_guard guard(g_synergyGeometryLock);auto it=g_synergyGeometryShapes.find(sample.identity);
+        if(it==g_synergyGeometryShapes.end()&&g_synergyGeometryShapes.size()>=512)return PLANCK_LIMIT;
+        if(it!=g_synergyGeometryShapes.end())next->previous=it->second;
+        g_synergyGeometryShapes[sample.identity]=next;
+    }
+    body->setShape(list);
+    if(body->getCollidable()->m_shape!=list)return PlanckSynergy::NativeGeometryPending;
+    ClearSynergyShapeBackPointers(next->previous);next->previous.reset();
+    *applied=sample;applied->children.clear();CaptureSynergyList(*applied,body);return PLANCK_OK;
 }
 
 void PublishSynergyActor(Actor* actor)
@@ -4331,6 +4438,7 @@ void PublishSynergyActor(Actor* actor)
                         state.capsuleB=SynergyVector(HkVectorToNiPoint(shape->getVertex(1)));
                         state.capsuleRadius=shape->m_radius;
                     }
+                    CaptureSynergyList(sample,body);
                     samples.push_back(sample);
                 }
             }
@@ -4338,6 +4446,8 @@ void PublishSynergyActor(Actor* actor)
                 Actor_IsInRagdollState(actor),*g_currentFrameCounter,g_synergyPhysicsTick.load(),g_currentFrameTime,samples,&events);
             PlanckSynergy::ProcessActorGeometry(handle,reinterpret_cast<uintptr_t>(actor->GetNiNode()),
                 samples,ApplySynergyCapsule,static_cast<bhkWorld*>(world),&events);
+            PlanckSynergy::ProcessActorCompoundGeometry(handle,reinterpret_cast<uintptr_t>(actor->GetNiNode()),
+                samples,ApplySynergyCompound,static_cast<bhkWorld*>(world),&events);
         }
     }
     // No client callback runs while our graph/world acquisition is held.
@@ -8708,6 +8818,7 @@ extern "C" {
         _MESSAGE("PLANCK loaded");
         PlanckSynergy::InstallNativeEndpointResolver(ResolveSynergyEndpoint);
         PlanckSynergy::SetGeometryExecutorAvailable(true);
+        PlanckSynergy::SetCompoundExecutorAvailable(true);
 
         if (Config::ReadConfigOptions()) {
             _MESSAGE("Successfully read config parameters");

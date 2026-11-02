@@ -1,5 +1,6 @@
 #include "planck_synergy.h"
 #include "planck_physical_interop.h"
+#include "planck_compound_api.h"
 #include <assert.h>
 #include <stddef.h>
 #include <string.h>
@@ -16,6 +17,11 @@ _Static_assert(sizeof(PlanckEvent)==72,"event ABI");
 _Static_assert(sizeof(PlanckGeometryRequest)==88,"geometry ABI");
 _Static_assert(offsetof(PlanckSynergyAPI,RegisterClient)==16,"table prefix");
 _Static_assert(sizeof(PlanckSynergyAPI)==128,"x64 revision2 table");
+_Static_assert(sizeof(PlanckCompoundGeometryAPI)==32,"compound table ABI");
+_Static_assert(sizeof(PlanckBodyGeometry)==72,"compound view ABI");
+_Static_assert(sizeof(PlanckShapeChild)==56,"child view ABI");
+_Static_assert(sizeof(PlanckCapsuleEdit)==40,"child proposal ABI");
+_Static_assert(sizeof(PlanckCompoundProposal)==64,"compound proposal ABI");
 int run_c_consumer(const PlanckSynergyAPI* api) {
     PlanckClientIdentity identity={sizeof(identity),0,"planck.test.c"};
     PlanckToken client=0,first=0;

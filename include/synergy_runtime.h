@@ -2,16 +2,23 @@
 #include "planck_synergy.h"
 #include "planck_physical_interop.h"
 #include "synergy_drive_runtime.h"
+#include "planck_compound_api.h"
 #include <cstdint>
 #include <vector>
 namespace PlanckSynergy {
-    struct BodySample { uintptr_t identity = 0, lineage = 0; PlanckBodyPhysics state{}; };
+    struct ShapeChildSample { uintptr_t identity=0;PlanckShapeChild state{}; };
+    struct BodySample {
+        uintptr_t identity=0,lineage=0;PlanckBodyPhysics state{};
+        // List identities are comparison keys, never native pointers to resolve.
+        uintptr_t listIdentity=0;std::vector<ShapeChildSample> children;
+    };
     // Native callers publish while holding graph -> world ownership. Stored
     // identities are comparison keys only; no native pointer is resolved here.
     struct DeferredEvent { uint32_t type; uint64_t subject; PlanckActorRef actor; uint32_t phase; };
     using DeferredEvents = std::vector<DeferredEvent>;
     const PlanckSynergyAPI* GetAPI();
     const PlanckPhysicalInteropAPI* GetPhysicalInteropAPI();
+    const PlanckCompoundGeometryAPI* GetCompoundGeometryAPI();
     using NativeEndpointResolver = PlanckStatus(*)(PlanckToken,PlanckToken,
         const PlanckEndpoint&,PlanckEndpointVisitor,void*);
     // Install once at plugin startup. The resolver acquires graph -> world,
@@ -25,6 +32,11 @@ namespace PlanckSynergy {
     void ProcessActorGeometry(uint32_t handle,uintptr_t modelIdentity,
         const std::vector<BodySample>& liveBodies,NativeGeometryExecutor,void*,DeferredEvents*);
     void SetGeometryExecutorAvailable(bool available);
+    using NativeCompoundExecutor=PlanckStatus(*)(PlanckToken,const BodySample&,
+        const PlanckCompoundProposal&,const std::vector<PlanckCapsuleEdit>&,void*,BodySample* applied);
+    void SetCompoundExecutorAvailable(bool available);
+    void ProcessActorCompoundGeometry(uint32_t handle,uintptr_t modelIdentity,
+        const std::vector<BodySample>& liveBodies,NativeCompoundExecutor,void*,DeferredEvents*);
     PlanckStatus VisitResolvedEndpoint(PlanckToken client,PlanckToken lease,
         uintptr_t modelIdentity,uintptr_t bodyIdentity,uintptr_t lineage,
         const PlanckNativeEndpoint&,PlanckEndpointVisitor,void*);

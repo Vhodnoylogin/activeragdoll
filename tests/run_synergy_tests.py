@@ -25,7 +25,7 @@ def main():
     environment=helper.msvc_environment() if os.name=='nt' else dict(os.environ)
     compiler=shutil.which('cl' if os.name=='nt' else 'g++',path=environment.get('PATH'))
     if not compiler: raise RuntimeError('C/C++ compiler unavailable')
-    sources=[ROOT/p for p in ('include/planck_synergy.h','include/planck_physical_interop.h','include/synergy_runtime.h','src/synergy_runtime.cpp',
+    sources=[ROOT/p for p in ('include/planck_synergy.h','include/planck_physical_interop.h','include/planck_compound_api.h','include/synergy_runtime.h','src/synergy_runtime.cpp',
         'tests/synergy_c_consumer.c','tests/synergy_runtime_tests.cpp','tests/synergy_native_fixture.cpp.in',
         'tests/run_synergy_tests.py','src/main.cpp','src/pluginapi.cpp')]
     expected=json.loads((ROOT/'tests/official001-sha256.json').read_text())
