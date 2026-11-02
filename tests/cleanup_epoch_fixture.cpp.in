@@ -58,6 +58,7 @@ double g_currentFrameTime=10;
 std::shared_mutex g_activeActorsLock;
 std::mutex g_activeRagdollsLock,g_grabbedActorStatesLock,g_actorMoveRestrictionsLock,g_disableLookAtActorsLock;
 ResetAwareSet<Actor*> g_activeActors;
+std::unordered_set<int> g_activeRagdollsByActor;
 std::unordered_set<int> g_activeRagdolls,g_grabbedActorStates,g_actorMoveRestrictions,g_disableLookAtActors,g_npcs,
     g_activeBipedGroups,g_noPlayerCharControllerCollideGroups,g_hittableCharControllerGroups,g_selfCollidableBipedGroups,
     g_higgsLingeringRigidBodies,g_bumpActors,g_shoveData,g_shoveAnimTimes,g_shovedActors,g_footYankedActors;

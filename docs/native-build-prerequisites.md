@@ -2,6 +2,17 @@
 
 Checked on 11 October 2026. The production plugin remains unbuilt and unqualified in Skyrim. Standalone source/ABI fixtures exercise the delivered repairs without establishing native hook or Havok layout compatibility. The current [implementation ledger](https://github.com/Vhodnoylogin/body-pouches/blob/main/docs/trinity-synergy/implementation-status.md) records that boundary.
 
+Rechecked 2 November 2026 after merging author upstream 0.8.2 and implementing the
+[additive API service](synergy-api.md). An isolated Release/x64 MSBuild attempt
+disabled all post-build events and used external OutDir/IntDir. The authored paths
+still fail `common/IPrefix.h`; supplying the installed original SKSE VR 2.00.12
+`src` and `src/sksevr` include roots advances compilation to absent compatible
+Havok headers (`Common/Base/hkBase.h`, convex-vertices and list-shape headers).
+The new standalone `synergy_runtime.cpp` translation unit compiles under the
+project's actual forced SKSE prefix. SDK sibling project references still do not
+resolve. No native DLL, installation or game start resulted. This confirms the
+existing dependency boundary rather than making a substitute Havok implementation.
+
 ## Available dependencies and configuration work
 
 MSVC toolset `v145` and Windows SDK `10.0.26100.0` are installed. Original SKSE VR `2.00.12` source, `common/IPrefix.h`, SKSE support sources, Xbyak and OpenVR headers also exist outside this checkout. The earlier missing-prefix/SKSE-project failures are caused by the authored project layout; they do not establish that the SDK is unavailable.

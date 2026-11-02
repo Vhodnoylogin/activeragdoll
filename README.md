@@ -2,11 +2,11 @@
 
 ## Cooperation development
 
-`main` preserves the upstream source; `development` contains the consolidated fork work and [PLANCK-specific synergy requirements](docs/trinity-synergy.md). The only maintained full concept and implementation ledger are in [Body Pouches](https://github.com/Vhodnoylogin/body-pouches/tree/main/docs/trinity-synergy). PLANCK owns NPC physics and hit processing; HIGGS owns hand/item physics and input, VRIK owns body interpretation and runtime slot interaction, and Body Slots owns declarative slot configuration.
+`main` preserves the upstream source; `development` contains the consolidated fork work and [PLANCK-specific synergy requirements](docs/trinity-synergy.md). The only maintained full concept and implementation ledger are in [Body Pouches](https://github.com/Vhodnoylogin/body-pouches/tree/main/docs/trinity-synergy). PLANCK owns NPC physics and hit processing; HIGGS owns hand states/use and input, VRIK supplies body/virtual-hand pose, PPB supplies anatomical surfaces/touch evidence, and Body Slots owns all slot mechanics.
 
 ## Proposed cooperation with VRIK HIGGS and PLANCK
 
-This fork's intended architectural direction is described in [the PLANCK synergy requirements](docs/trinity-synergy.md), linked to the full concept maintained only in Body Pouches. PLANCK owns NPC physics and hits; a separate slot service owns offline authoring and saved definitions, while VRIK handles their runtime binding and interactions. These are proposed services, not a released API or an agreement with the framework authors.
+This fork's intended direction follows the concept maintained only in Body Pouches. The source API below implements a bounded part of PLANCK's role; the remaining contracts and qualification limits are explicit. This is not an agreement with the framework authors or a game-qualified release.
 
 The [native build prerequisites](docs/native-build-prerequisites.md) distinguish the available SKSE/toolchain from nonportable project paths and the remaining compatible Havok headers.
 
@@ -16,7 +16,15 @@ The development branch includes bounded lifecycle repairs for temporary NPC
 movement/look-at restrictions and nested hit-event context. Run their source-backed
 standalone checks with `python tests/run_lifecycle_regressions.py --build-dir <external-directory>`.
 The [regression fixture](tests/README.md) uses a fake engine; the native plugin
-remains unbuilt and untested in game, and the proposed endpoint ABI is not implemented.
+remains unbuilt and untested in game.
+
+`development` also implements an additive [plain-C cooperation API](docs/synergy-api.md)
+with copied actor/body samples, validated endpoint descriptors, owned policies and
+removable callbacks, precommit physical-hit decisions. Geometry proposals currently return
+`UNSUPPORTED`; their capability is absent after review exposed an unsafe native
+lifetime handoff. Revision 001 is unchanged. The actual service and selected native adapters
+have standalone CPU fixtures; HIGGS constraint transport and native/game qualification
+remain outstanding. The branch merges upstream 0.8.2 at `aed524a`.
 
 A private [reset-only deferred cleanup fence](docs/deferred-cleanup.md) also prevents
 queued furniture/get-up collision cleanup from adopting a replacement graph after

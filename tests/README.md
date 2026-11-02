@@ -19,7 +19,8 @@ structural guards. The movement/look-at engine consumers themselves are not buil
 by this fixture. Current-event behavior covers synchronous calls routed through
 the repaired dispatch hook; direct event sends elsewhere bypass it. The pointer
 remains legacy process-global state, with no concurrent-dispatch or retained-pointer
-guarantee. No endpoint ABI is added.
+guarantee. These earlier lifecycle repairs alone add no endpoint ABI; the separate
+cooperation API suite below covers revision 2.
 
 Windows checks use MSVC C++20 `/EHsc /W4 /WX`. Exception restoration is qualified
 under those fixture flags; the native Release project does not explicitly enable
@@ -34,3 +35,17 @@ The separate reset-only deferred cleanup fixture runs with
 It executes all three production enqueue hooks, the delayed queue, cleanup task
 and reset, including already-queued work and separate stale-run/recaptured-ticket
 negative controls. See [its bounded contract](../docs/deferred-cleanup.md).
+# Additive cooperation API checks
+
+`python tests/run_synergy_tests.py --build-dir <external-directory>` compiles the
+actual production `src/synergy_runtime.cpp`, a C11 consumer and C++ checks with
+warnings treated as errors. It covers owner isolation, generations/reset/loading,
+concurrent coherent snapshots, endpoint leases, callback self-removal/client close
+and concurrent drainage, scoped hit veto/scale decisions, immutable results and
+terminal cancellation during 300 target-invalidation cycles and unsupported geometry requests.
+An additional actual-source fixture extracts the native clutter hit method and
+actor publisher, checking veto/scale before engine commitment and publication
+under graph/world ownership, physical destruction at world unlock without stale
+republication, and publication callbacks after lock release. These use explicit fake engine objects; they do
+not qualify native Havok layouts, hook installation or game behavior. Read the
+[ABI/phase contract](../docs/synergy-api.md) for the exact delivered boundary.

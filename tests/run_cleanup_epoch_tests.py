@@ -73,7 +73,7 @@ def main():
             if result.count(marker) != 1:
                 raise RuntimeError("Missing/duplicate marker: " + name)
             result = result.replace(marker, block)
-        return result
+        return '#include "synergy_runtime.h"\n' + result
 
     variants = {"current": (render(blocks), None)}
     stale = dict(blocks)
@@ -111,10 +111,10 @@ def main():
         executable = directory / ("cleanup_fixture.exe" if os.name == "nt" else "cleanup_fixture")
         if os.name == "nt":
             command = [compiler, "/nologo", "/std:c++20", "/EHsc", "/W4", "/WX", "/O2", "/I" + str(ROOT / "include"),
-                       str(generated), "/Fe:" + str(executable), "/link", "/MACHINE:X64"]
+                       str(generated), str(ROOT / "src/synergy_runtime.cpp"), "/Fe:" + str(executable), "/link", "/MACHINE:X64"]
         else:
             command = [compiler, "-std=c++20", "-Wall", "-Wextra", "-Werror", "-Wno-sign-compare", "-O2", "-pthread",
-                       "-I" + str(ROOT / "include"), str(generated), "-o", str(executable)]
+                       "-I" + str(ROOT / "include"), str(generated), str(ROOT / "src/synergy_runtime.cpp"), "-o", str(executable)]
         compiled = subprocess.run(command, cwd=directory, env=env, capture_output=True)
         (directory / "compile.log").write_text((compiled.stdout + compiled.stderr).decode(errors="replace"))
         if compiled.returncode:

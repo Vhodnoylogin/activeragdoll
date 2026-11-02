@@ -46,6 +46,11 @@
 #include "papyrusapi.h"
 #include "draw.h"
 #include "cleanup_epoch.h"
+#include "synergy_runtime.h"
+
+std::atomic<uint64_t> g_synergyPhysicsTick{0};
+PlanckVec3 SynergyVector(const NiPoint3& point) { return {point.x,point.y,point.z}; }
+void PublishSynergyActor(Actor* actor);
 
 
 // SKSE globals
@@ -1599,6 +1604,18 @@ struct DoActorHitTask : TaskDelegate
     {
         PlayerCharacter *player = *g_thePlayer;
 
+        // A retained old hit node must not become a hit on a replacement model.
+        if (!DoesRefrHaveNode(hitActor, hitNode)) return;
+        auto candidate = PlanckSynergy::BeginHit(PLANCK_HIT_MELEE, GetOrCreateRefrHandle(hitActor),
+            GetOrCreateRefrHandle(player), SynergyVector(hitPosition * *g_havokWorldScale),
+            SynergyVector(hitVelocity * *g_havokWorldScale), -1.f, isLeft ? 1 : 0,
+            *g_currentFrameCounter, g_synergyPhysicsTick.load());
+        if (candidate.outcome != PLANCK_HIT_PENDING) return;
+        struct HitScope {
+            uint64_t id;
+            ~HitScope() { PlanckSynergy::FinishHit(id, false); }
+        } hitScope{candidate.hitId};
+
         SwingHandler &swingHandler = isLeft ? g_leftSwingHandler : g_rightSwingHandler;
         if (!swingHandler.IsSwingCoolingDown()) {
             // There was no recent swing, so perform one now
@@ -1625,7 +1642,10 @@ struct DoActorHitTask : TaskDelegate
         NiPoint3 *playerLastHitVelocity = (NiPoint3 *)((UInt64)player + 0x6C8);
         *playerLastHitVelocity = hitVelocity;
 
+        if (!PlanckCleanup::IsCurrent(synergyEpoch) || !DoesRefrHaveNode(hitActor, hitNode)) return;
         bool isFatal = HitActor(player, hitActor, hitNode, hitPosition, hitVelocity, isLeft, isOffhand, isPowerAttack, isBash);
+        PlanckSynergy::FinishHit(hitScope.id, true);
+        hitScope.id = 0;
 
         PlayMeleeImpactRumble(isTwoHanding ? 2 : isLeft);
 
@@ -1654,13 +1674,14 @@ struct DoActorHitTask : TaskDelegate
     }
 
     DoActorHitTask(UInt32 actorHandle, const NiPoint3 &hitPosition, const NiPoint3 &hitVelocity, NiPointer<NiAVObject> hitNode, float impulseMult, bool isLeft, bool isOffhand, bool isTwoHanding, bool isStab)
-        : hitActorHandle(actorHandle), hitPosition(hitPosition), hitVelocity(hitVelocity), hitNode(hitNode), impulseMult(impulseMult), isLeft(isLeft), isOffhand(isOffhand), isTwoHanding(isTwoHanding), isStab(isStab) {}
+        : hitActorHandle(actorHandle), hitPosition(hitPosition), hitVelocity(hitVelocity), hitNode(hitNode), impulseMult(impulseMult), isLeft(isLeft), isOffhand(isOffhand), isTwoHanding(isTwoHanding), isStab(isStab), synergyEpoch(PlanckCleanup::Capture()) {}
 
     static DoActorHitTask *Create(UInt32 actorHandle, const NiPoint3 &hitPosition, const NiPoint3 &hitVelocity, NiPointer<NiAVObject> hitNode, float impulseMult, bool isLeft, bool isOffhand, bool isTwoHanding, bool isStab) {
         return new DoActorHitTask(actorHandle, hitPosition, hitVelocity, hitNode, impulseMult, isLeft, isOffhand, isTwoHanding, isStab);
     }
 
     virtual void Run() {
+        if (!PlanckCleanup::IsCurrent(synergyEpoch)) return;
         NiPointer<TESObjectREFR> refr;
         if (LookupREFRByHandle(hitActorHandle, refr)) {
             if (Actor *actor = DYNAMIC_CAST(refr, TESObjectREFR, Actor)) {
@@ -1682,6 +1703,7 @@ struct DoActorHitTask : TaskDelegate
     bool isOffhand;
     bool isTwoHanding;
     bool isStab;
+    PlanckCleanup::Ticket synergyEpoch;
 };
 
 
@@ -1957,6 +1979,22 @@ struct PhysicsListener :
                 hitData.aggressor = GetOrCreateRefrHandle(source);
             }
             if (hitData.totalDamage > 0.f) {
+                auto candidate = PlanckSynergy::BeginHit(PLANCK_HIT_CLUTTER, GetOrCreateRefrHandle(target),
+                    source ? GetOrCreateRefrHandle(source) : 0, SynergyVector(hitPos),
+                    SynergyVector(HkVectorToNiPoint(collidingBody->hkBody->getLinearVelocity())),
+                    hitData.totalDamage, 2, *g_currentFrameCounter, g_synergyPhysicsTick.load());
+                if (candidate.outcome != PLANCK_HIT_PENDING || candidate.damageScale == 0.f) {
+                    PlanckSynergy::FinishHit(candidate.hitId, false);
+                    HitData_dtor(&hitData);
+                    return;
+                }
+                hitData.totalDamage *= candidate.damageScale;
+                hitData.healthDamage *= candidate.damageScale;
+                hitData.physicalDamage *= candidate.damageScale;
+                hitData.targetedLimbDamage *= candidate.damageScale;
+                hitData.resistedPhysicalDamage *= candidate.damageScale;
+                hitData.resistedTypedDamage *= candidate.damageScale;
+                hitData.reflectedDamage *= candidate.damageScale;
                 if (NiPointer<TESObjectREFR> hittingRefr = GetRefFromCollidable(collidingBody->hkBody->getCollidable())) {
                     if (TESForm *baseForm = hittingRefr->baseForm) {
                         // set an unused flag to signify that this is physics damage
@@ -1966,6 +2004,7 @@ struct PhysicsListener :
                 }
 
                 Actor_GetHit(target, hitData);
+                PlanckSynergy::FinishHit(candidate.hitId, true);
                 if (Config::options.physicsHitRecoveryTime > 0) {
                     physicsHitCooldownTargets[{ target, collidingBody->hkBody }] = g_currentFrameTime;
                 }
@@ -2520,6 +2559,13 @@ struct PhysicsListener :
         g_taskInterface->AddTask(PotentiallyConvertBipedObjectToDeadBipTask::Create(GetOrCreateRefrHandle(refr), wrapper));
     }
 
+    virtual void entityRemovedCallback(hkpEntity *entity) override {
+        PlanckSynergy::InvalidateBody(reinterpret_cast<uintptr_t>(entity));
+    }
+    virtual void entityDeletedCallback(hkpEntity *entity) override {
+        PlanckSynergy::InvalidateBody(reinterpret_cast<uintptr_t>(entity));
+    }
+
     bhkWorld *m_world = nullptr;
 };
 PhysicsListener g_physicsListener{};
@@ -2779,6 +2825,8 @@ void PrePhysicsStepCallback(void *world)
     // This hook is after all ragdolls' driveToPose(), and before the hkpWorld physics step
 
     // At this point we can apply any impulses / velocity adjustments without fear of them being overwritten
+
+    ++g_synergyPhysicsTick;
 
     for (auto &job : g_prePhysicsStepJobs) {
         job->Run();
@@ -3611,6 +3659,7 @@ void RestoreAndClearPendingConstraintSnapshot(ActiveRagdoll &ragdoll, hkbRagdoll
 
 void CleanupActiveRagdollTracking(Actor *actor)
 {
+    PlanckSynergy::InvalidateActor(GetOrCreateRefrHandle(actor));
     BSAnimationGraphManagerPtr animGraphManager;
     if (GetAnimationGraphManager(actor, animGraphManager)) {
         BSAnimationGraphManager *manager = animGraphManager.ptr;
@@ -4088,6 +4137,7 @@ bool UpdateActorShove(Actor *actor)
 void ResetObjects()
 {
     PlanckCleanup::Invalidate(); // Retire queued cleanup before clearing its old tracking scope.
+    PlanckSynergy::Reset();
 #ifdef _DEBUG
     _MESSAGE("%d Reset objects", *g_currentFrameCounter);
 #endif // _DEBUG
@@ -4138,6 +4188,65 @@ void ResetObjects()
 }
 
 double g_worldChangedTime = 0.0;
+
+void PublishSynergyActor(Actor* actor)
+{
+    PlanckSynergy::DeferredEvents events;
+    BSAnimationGraphManagerPtr graphManager;
+    const UInt32 handle=GetOrCreateRefrHandle(actor);
+    if (!GetAnimationGraphManager(actor,graphManager)) {
+        PlanckSynergy::InvalidateActor(handle);
+        return;
+    }
+    {
+        // Hold graph -> world throughout both capture and registry publication.
+        // Removal cannot invalidate/free a body between capture and publication.
+        SimpleLocker graphLock(&graphManager.ptr->updateLock);
+        NiPointer<bhkWorld> world;
+        if (actor->parentCell) world=GetHavokWorldFromCell(actor->parentCell);
+        if (!world || !world->world) {
+            PlanckSynergy::InvalidateActor(handle,&events);
+        } else {
+            BSReadLocker worldLock(&world->worldLock);
+            std::vector<PlanckSynergy::BodySample> samples;
+            for (UInt32 graphIndex=0; graphIndex<graphManager.ptr->graphs.size; ++graphIndex) {
+                BShkbAnimationGraph* graph=graphManager.ptr->graphs.GetData()[graphIndex].ptr;
+                hkbRagdollDriver* driver=graph ? graph->character.ragdollDriver : nullptr;
+                if (!driver || !driver->ragdoll || !GetActiveRagdollFromDriver(driver)) continue;
+                hkaRagdollInstance* ragdoll=driver->ragdoll;
+                if (ragdoll->getWorld()!=world->world.val()) continue;
+                for (int i=0; i<ragdoll->m_rigidBodies.getSize(); ++i) {
+                    hkpRigidBody* body=ragdoll->m_rigidBodies[i];
+                    if (!body || body->getWorld()!=world->world.val()) continue;
+                    PlanckSynergy::BodySample sample;
+                    sample.identity=reinterpret_cast<uintptr_t>(body);
+                    sample.lineage=reinterpret_cast<uintptr_t>(ragdoll);
+                    auto& state=sample.state;
+                    state.size=sizeof(state);
+                    state.worldPosition=SynergyVector(HkVectorToNiPoint(body->getPosition()));
+                    for (int j=0; j<4; ++j) state.worldRotation[j]=body->getRotation().m_vec(j);
+                    if (ragdoll->m_skeleton && i<ragdoll->m_skeleton->m_bones.getSize()) {
+                        const char* name=ragdoll->m_skeleton->m_bones[i].m_name.cString();
+                        if (name) strncpy_s(state.boneName,name,_TRUNCATE);
+                    }
+                    if (auto shape=DYNAMIC_CAST(body->getCollidable()->m_shape,hkpShape,hkpCapsuleShape)) {
+                        state.capsule=1;
+                        state.capsuleA=SynergyVector(HkVectorToNiPoint(shape->getVertex(0)));
+                        state.capsuleB=SynergyVector(HkVectorToNiPoint(shape->getVertex(1)));
+                        state.capsuleRadius=shape->m_radius;
+                    }
+                    samples.push_back(sample);
+                }
+            }
+            // Stored native identities are comparison keys only. Geometry has no
+            // advertised executor and cannot resolve/dereference a queued key.
+            PlanckSynergy::PublishActor(handle,reinterpret_cast<uintptr_t>(actor->GetNiNode()),
+                Actor_IsInRagdollState(actor),*g_currentFrameCounter,g_synergyPhysicsTick.load(),g_currentFrameTime,samples,&events);
+        }
+    }
+    // No client callback runs while our graph/world acquisition is held.
+    PlanckSynergy::DispatchEvents(events);
+}
 
 
 void PlayerCharacter_UpdateWeaponSwing_Hook(PlayerCharacter *player, float deltaTime)
@@ -4756,6 +4865,7 @@ void ProcessHavokHitJobsHook(HavokHitJobs *havokHitJobs)
         if (LookupREFRByHandle(actorHandle, refr) && refr != player) {
             Actor *actor = DYNAMIC_CAST(refr, TESObjectREFR, Actor);
             if (!actor || !actor->GetNiNode()) {
+                PlanckSynergy::InvalidateActor(actorHandle);
                 continue;
             }
 
@@ -4920,6 +5030,7 @@ void ProcessHavokHitJobsHook(HavokHitJobs *havokHitJobs)
                         }
                     }
                 }
+                PublishSynergyActor(actor);
             }
         }
     }
@@ -8396,8 +8507,13 @@ extern "C" {
                     ShowErrorBoxAndTerminate("[CRITICAL] Did NOT get higgs interface. HIGGS is required for this mod.");
                 }
             }
+            else if (msg->type == SKSEMessagingInterface::kMessage_PreLoadGame) {
+                PlanckCleanup::Invalidate();
+                PlanckSynergy::SetSuspended(true);
+            }
             else if (msg->type == SKSEMessagingInterface::kMessage_PostLoadGame || msg->type == SKSEMessagingInterface::kMessage_NewGame) {
-                bool loadSucceeded = (bool)msg->data;
+                PlanckSynergy::SetSuspended(false);
+                bool loadSucceeded = msg->type == SKSEMessagingInterface::kMessage_NewGame || (bool)msg->data;
                 if (loadSucceeded) {
                     ResetObjects();
                 }

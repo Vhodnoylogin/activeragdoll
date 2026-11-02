@@ -170,6 +170,7 @@
     <ClCompile Include="src\papyrusapi.cpp" />
     <ClCompile Include="src\planckinterface001.cpp" />
     <ClCompile Include="src\pluginapi.cpp" />
+    <ClCompile Include="src\synergy_runtime.cpp" />
     <ClCompile Include="src\RE\havok.cpp" />
     <ClCompile Include="src\RE\offsets.cpp" />
     <ClCompile Include="src\utils.cpp" />
@@ -186,6 +187,8 @@
     <ClInclude Include="include\papyrusapi.h" />
     <ClInclude Include="include\planckinterface001.h" />
     <ClInclude Include="include\pluginapi.h" />
+    <ClInclude Include="include\planck_synergy.h" />
+    <ClInclude Include="include\synergy_runtime.h" />
     <ClInclude Include="include\RE\havok.h" />
     <ClInclude Include="include\RE\havok_behavior.h" />
     <ClInclude Include="include\RE\misc.h" />

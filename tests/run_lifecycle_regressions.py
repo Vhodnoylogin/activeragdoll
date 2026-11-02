@@ -72,7 +72,7 @@ def main():
     source = (ROOT / "src/main.cpp").read_text()
     blocks = {name: extract_function(source, signature) for name, signature in FUNCTIONS.items()}
     fixture = (ROOT / "tests/lifecycle_fixture.cpp.in").read_text()
-    fixture = '#include "' + (ROOT / "include/cleanup_epoch.h").as_posix() + '"\n' + fixture
+    fixture = '#include "' + (ROOT / "include/cleanup_epoch.h").as_posix() + '"\n#include "synergy_runtime.h"\n' + fixture
     for name, block in blocks.items():
         marker = f"/*@{name}@*/"
         if fixture.count(marker) != 1:
@@ -101,6 +101,7 @@ def main():
         "extracted_functions": {name: hashlib.sha256(block.encode()).hexdigest() for name, block in blocks.items()},
         "fixture_sha256": hashlib.sha256((ROOT / "tests/lifecycle_fixture.cpp.in").read_bytes()).hexdigest(),
         "qualification": "C++ production control flow with fake engine; native plugin unbuilt",
+        "synergy_runtime_sha256": hashlib.sha256((ROOT / "src/synergy_runtime.cpp").read_bytes()).hexdigest(),
     }
     (output / "source-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     if os.name == "nt":
@@ -109,13 +110,13 @@ def main():
         if not compiler:
             raise RuntimeError("MSVC environment did not provide cl.exe")
         executable = output / "planck_lifecycle_regressions.exe"
-        run([compiler, "/nologo", "/std:c++20", "/EHsc", "/W4", "/WX", "/O2", generated,
+        run([compiler, "/nologo", "/std:c++20", "/EHsc", "/W4", "/WX", "/O2", "/I" + str(ROOT / "include"), generated, ROOT / "src/synergy_runtime.cpp",
              f"/Fe{executable}", "/link", "/MACHINE:X64"], output, environment)
         run([executable], output, environment)
     else:
         executable = output / "planck_lifecycle_regressions"
         run(["g++", "-std=c++20", "-Wall", "-Wextra", "-Werror", "-Wno-missing-field-initializers",
-             "-O2", "-pthread", generated, "-o", executable], output)
+             "-O2", "-pthread", "-I" + str(ROOT / "include"), generated, ROOT / "src/synergy_runtime.cpp", "-o", executable], output)
         run([executable], output)
     return 0
 

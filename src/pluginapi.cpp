@@ -3,6 +3,7 @@
 #include "config.h"
 #include "pluginapi.h"
 #include "version.h"
+#include "synergy_runtime.h"
 
 using namespace PlanckPluginAPI;
 
@@ -19,6 +20,7 @@ PlanckInterface001 g_interface001;
 void *GetApi(unsigned int revisionNumber) {
     switch (revisionNumber) {
     case 1:	_MESSAGE("Interface revision 1 requested"); return &g_interface001;
+    case 2: return const_cast<PlanckSynergyAPI*>(PlanckSynergy::GetAPI());
     }
     return nullptr;
 }
