@@ -257,6 +257,8 @@ struct LinearImpulseJob : GenericJob
 
 std::shared_mutex g_activeRagdollsLock{};
 std::unordered_map<hkbRagdollDriver *, std::shared_ptr<ActiveRagdoll>> g_activeRagdolls{};
+// Same ragdolls as g_activeRagdolls, indexed by actor so they can be looked up without the anim graph manager's updateLock
+std::unordered_map<Actor *, std::unordered_map<hkbRagdollDriver *, std::shared_ptr<ActiveRagdoll>>> g_activeRagdollsByActor{};
 
 std::shared_ptr<ActiveRagdoll> GetActiveRagdollFromDriver(hkbRagdollDriver *driver)
 {
@@ -264,6 +266,20 @@ std::shared_ptr<ActiveRagdoll> GetActiveRagdollFromDriver(hkbRagdollDriver *driv
     auto it = g_activeRagdolls.find(driver);
     if (it == g_activeRagdolls.end()) return nullptr;
     return it->second;
+}
+
+// This mainly exists to get ActiveRagdoll data without having to go through ForEachRagdollDriver and acquiring the anim graph manager's updateLock
+std::vector<std::shared_ptr<ActiveRagdoll>> GetActiveRagdollsFromActor(Actor *actor)
+{
+    std::vector<std::shared_ptr<ActiveRagdoll>> ragdolls;
+    std::shared_lock lock(g_activeRagdollsLock);
+    auto it = g_activeRagdollsByActor.find(actor);
+    if (it == g_activeRagdollsByActor.end()) return ragdolls;
+    ragdolls.reserve(it->second.size());
+    for (auto &[driver, ragdoll] : it->second) {
+        ragdolls.push_back(ragdoll);
+    }
+    return ragdolls;
 }
 
 std::shared_mutex g_activeActorsLock{};
@@ -3466,6 +3482,7 @@ bool AddRagdollToWorld(Actor *actor)
 
             {
                 SimpleLocker lock(&manager->updateLock);
+
                 for (int i = 0; i < manager->graphs.size; i++) {
                     BShkbAnimationGraph *graph = manager->graphs.GetData()[i].ptr;
                     if (hkbRagdollDriver *driver = graph->character.ragdollDriver) {
@@ -3486,7 +3503,6 @@ bool AddRagdollToWorld(Actor *actor)
                         if (!graph->world && parentCell) {
                             // World must be set before calling BShkbAnimationGraph::AddRagdollToWorld(), and is required for the graph to register its physics step listener (and hence call hkbRagdollDriver::driveToPose())
                             graph->world = GetHavokWorldFromCell(parentCell);
-                            activeRagdoll->shouldNullOutWorldWhenRemovingFromWorld = true;
                         }
 
                         if (Config::options.fixupSkeletonMappings) {
@@ -3508,6 +3524,7 @@ bool AddRagdollToWorld(Actor *actor)
                         {
                             std::scoped_lock lock2(g_activeRagdollsLock);
                             g_activeRagdolls[driver] = activeRagdoll;
+                            g_activeRagdollsByActor[actor][driver] = activeRagdoll;
                         }
 
                         {
@@ -3516,27 +3533,30 @@ bool AddRagdollToWorld(Actor *actor)
                         }
                     }
                 }
-            }
 
-            if (parentCell) {
-                if (NiPointer<bhkWorld> world = GetHavokWorldFromCell(parentCell)) {
+                // Keep holding the updateLock here so that we always have updateLock, then bhkWorld lock, in that order.
+
+                if (parentCell) {
+                    if (NiPointer<bhkWorld> world = GetHavokWorldFromCell(parentCell)) {
 #ifdef _DEBUG
-                    if (TESFullName *name = DYNAMIC_CAST(actor->baseForm, TESForm, TESFullName)) {
-                        _MESSAGE("%d %s: Add ragdoll to world", *g_currentFrameCounter, name->name);
-                    }
+                        if (TESFullName *name = DYNAMIC_CAST(actor->baseForm, TESForm, TESFullName)) {
+                            _MESSAGE("%d %s: Add ragdoll to world", *g_currentFrameCounter, name->name);
+                        }
 #endif // _DEBUG
 
-                    BSWriteLocker lock(&world->worldLock);
+                        BSWriteLocker lock(&world->worldLock);
 
-                    bool x = false;
-                    BSAnimationGraphManager_AddRagdollToWorld(animGraphManager.ptr, &x);
+                        bool x = false;
+                        BSAnimationGraphManager_AddRagdollToWorld(animGraphManager.ptr, &x);
 
-                    ModifyConstraints(actor);
+                        ModifyConstraints(actor);
 
-                    x = false;
-                    BSAnimationGraphManager_SetRagdollConstraintsFromBhkConstraints(animGraphManager.ptr, &x);
+                        x = false;
+                        BSAnimationGraphManager_SetRagdollConstraintsFromBhkConstraints(animGraphManager.ptr, &x);
+                    }
                 }
             }
+
         }
     }
 
@@ -3600,7 +3620,8 @@ void CleanupActiveRagdollTracking(Actor *actor)
                 BShkbAnimationGraph *graph = manager->graphs.GetData()[i].ptr;
                 if (hkbRagdollDriver *driver = graph->character.ragdollDriver) {
                     if (std::shared_ptr<ActiveRagdoll> ragdoll = GetActiveRagdollFromDriver(driver)) {
-                        if (ragdoll && ragdoll->shouldNullOutWorldWhenRemovingFromWorld) {
+                        // Match Actor::MoveHavok: the game nulls the world for actors using furniture
+                        if (IsActorUsingFurniture(actor)) {
                             graph->world = nullptr;
                         }
                     }
@@ -3608,6 +3629,13 @@ void CleanupActiveRagdollTracking(Actor *actor)
                     {
                         std::scoped_lock lock2(g_activeRagdollsLock);
                         g_activeRagdolls.erase(driver);
+                        auto it = g_activeRagdollsByActor.find(actor);
+                        if (it != g_activeRagdollsByActor.end()) {
+                            it->second.erase(driver);
+                            if (it->second.empty()) {
+                                g_activeRagdollsByActor.erase(it);
+                            }
+                        }
                     }
 
                     {
@@ -4077,6 +4105,7 @@ void ResetObjects()
     {
         std::scoped_lock lock(g_activeRagdollsLock);
         g_activeRagdolls.clear();
+        g_activeRagdollsByActor.clear();
     }
 
     {
@@ -7102,43 +7131,42 @@ void ahkpCharacterProxy_updateManifold_Hook(hkpCharacterProxy *proxy, hkpAllCdPo
 
                             bool removeBecauseSmallRace = Config::options.dontCollidePlayerWithSmallRaces && IsSmallActor(actor);
 
-                            ForEachRagdollDriver(actor, [actor, rigidBody, hit, layer, isPushable, isBipedNoCC, removeBecauseSmallRace](hkbRagdollDriver *driver) {
-                                if (std::shared_ptr<ActiveRagdoll> activeRagdoll = GetActiveRagdollFromDriver(driver)) {
-                                    // If they are using furniture (bipedNoCC), and we push them, they will instead get pushed when they stop using it which we don't want.
-                                    if (!isBipedNoCC && isPushable) {
-                                        if (std::ranges::find(activeRagdoll->coreNodes.toHead, rigidBody) != activeRagdoll->coreNodes.toHead.end()) {
-                                            float penetrationDistance = hit.m_contact.getDistance() * -1.f; // negative means penetrating
-                                            // PrintToFile(std::to_string(penetrationDistance), "coreNodeDistance.txt");
+                            // Don't use ForEachRagdollDriver here - updateManifold runs under the havok world write lock, and taking the anim graph manager's updateLock in here could cause a deadlock
+                            for (const std::shared_ptr<ActiveRagdoll> &activeRagdoll : GetActiveRagdollsFromActor(actor)) {
+                                // If they are using furniture (bipedNoCC), and we push them, they will instead get pushed when they stop using it which we don't want.
+                                if (!isBipedNoCC && isPushable) {
+                                    if (std::ranges::find(activeRagdoll->coreNodes.toHead, rigidBody) != activeRagdoll->coreNodes.toHead.end()) {
+                                        float penetrationDistance = hit.m_contact.getDistance() * -1.f; // negative means penetrating
+                                        // PrintToFile(std::to_string(penetrationDistance), "coreNodeDistance.txt");
 
-                                            auto it = g_collidedActorsPushAway.find(actor);
-                                            if (it != g_collidedActorsPushAway.end()) {
-                                                // Actor is already in the list, update the last collided frame and most penetration distance if it's larger
-                                                if (penetrationDistance > it->second.mostPenetrationDistance) {
-                                                    it->second.mostPenetrationDistance = penetrationDistance;
-                                                }
-                                                it->second.lastCollidedFrame = *g_currentFrameCounter;
+                                        auto it = g_collidedActorsPushAway.find(actor);
+                                        if (it != g_collidedActorsPushAway.end()) {
+                                            // Actor is already in the list, update the last collided frame and most penetration distance if it's larger
+                                            if (penetrationDistance > it->second.mostPenetrationDistance) {
+                                                it->second.mostPenetrationDistance = penetrationDistance;
                                             }
-                                            else {
-                                                // New actor collision, add to the list with the current frame and initial offset
-                                                g_collidedActorsPushAway[actor] = { penetrationDistance, *g_currentFrameCounter };
-                                            }
+                                            it->second.lastCollidedFrame = *g_currentFrameCounter;
                                         }
-                                    }
-
-                                    // TODO: Maybe if it's not a core node we just don't collide at all??
-                                    if (!removeBecauseSmallRace) {
-                                        if (std::ranges::find(activeRagdoll->coreNodes.toTorso, rigidBody) != activeRagdoll->coreNodes.toTorso.end()) {
-                                            float penetrationDistance = hit.m_contact.getDistance() * -1.f;
-                                            // PrintToFile(std::to_string(penetrationDistance), "torsoNodeDistance.txt");
-                                            bool isInCombatWithPlayer = Actor_IsInCombatWithActor(actor, *g_thePlayer);
-                                            float minIntersectDistance = isInCombatWithPlayer ? Config::options.playerActorCollisionPhaseThroughMinIntersectDistanceInCombat : Config::options.playerActorCollisionPhaseThroughMinIntersectDistance;
-                                            if (penetrationDistance > minIntersectDistance) {
-                                                g_dontCollideUntilStoppedCollidingActors.insert(actor);
-                                            }
+                                        else {
+                                            // New actor collision, add to the list with the current frame and initial offset
+                                            g_collidedActorsPushAway[actor] = { penetrationDistance, *g_currentFrameCounter };
                                         }
                                     }
                                 }
-                            });
+
+                                // TODO: Maybe if it's not a core node we just don't collide at all??
+                                if (!removeBecauseSmallRace) {
+                                    if (std::ranges::find(activeRagdoll->coreNodes.toTorso, rigidBody) != activeRagdoll->coreNodes.toTorso.end()) {
+                                        float penetrationDistance = hit.m_contact.getDistance() * -1.f;
+                                        // PrintToFile(std::to_string(penetrationDistance), "torsoNodeDistance.txt");
+                                        bool isInCombatWithPlayer = Actor_IsInCombatWithActor(actor, *g_thePlayer);
+                                        float minIntersectDistance = isInCombatWithPlayer ? Config::options.playerActorCollisionPhaseThroughMinIntersectDistanceInCombat : Config::options.playerActorCollisionPhaseThroughMinIntersectDistance;
+                                        if (penetrationDistance > minIntersectDistance) {
+                                            g_dontCollideUntilStoppedCollidingActors.insert(actor);
+                                        }
+                                    }
+                                }
+                            }
 
                             bool removeBecauseDontCollide = g_dontCollideUntilStoppedCollidingActors.find(actor) != g_dontCollideUntilStoppedCollidingActors.end();
 
