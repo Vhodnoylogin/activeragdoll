@@ -7,6 +7,7 @@
 #include <optional>
 #include <shared_mutex>
 #include "synergy_hand_parts.h"
+#include "synergy_own_contact.h"
 
 #include <Physics/Collide/Shape/Convex/ConvexVertices/hkpConvexVerticesShape.h>
 #include <Physics/Collide/Shape/Convex/Capsule/hkpCapsuleShape.h>
@@ -54,6 +55,25 @@
 std::atomic<uint64_t> g_synergyPhysicsTick{0};
 std::atomic<DWORD> g_synergyActorThread{0};
 PlanckVec3 SynergyVector(const NiPoint3& point) { return {point.x,point.y,point.z}; }
+void ForwardOwnItemCosmeticContact(const hkpContactPointEvent& event,bool responseDisabled,bool hitPathSkipped){
+    if(!PlanckSynergy::HasOwnContactObserver())return;
+    if(!event.m_contactPoint||!event.m_bodies[0]||!event.m_bodies[1]||event.m_bodies[0]==event.m_bodies[1])return;
+    const auto* first=event.m_bodies[0];const auto* second=event.m_bodies[1];
+    const auto world=first->getWorld();if(!world||second->getWorld()!=world)return;
+    const auto point=event.m_contactPoint->getPosition();
+    // Both velocities are sampled at this same point. Angular motion must not
+    // disappear into center-of-mass speed or independent maximum-speed guesses.
+    const auto a=hkpRigidBody_getPointVelocity(first,point);
+    const auto b=hkpRigidBody_getPointVelocity(second,point);
+    const auto normal=event.m_contactPoint->getNormal();
+    HIGGS_NativeOwnContact input{};input.structSize=sizeof(input);input.producer=HIGGS_NATIVE_OWN_CONTACT_PLANCK;
+    input.bodyA=reinterpret_cast<uintptr_t>(first);input.bodyB=reinterpret_cast<uintptr_t>(second);input.world=reinterpret_cast<uintptr_t>(world);
+    input.mainFrame=*g_currentFrameCounter;input.physicsTick=g_synergyPhysicsTick.load();input.contactFlags=(responseDisabled?HIGGS_NATIVE_OWN_RESPONSE_DISABLED:0)|(hitPathSkipped?HIGGS_NATIVE_OWN_HIT_PATH_SKIPPED:0);
+    for(unsigned i=0;i<3;++i){input.positionMetres[i]=point(i);input.bToANormal[i]=normal(i);}
+    input.pointVelocityA[0]=a.x;input.pointVelocityA[1]=a.y;input.pointVelocityA[2]=a.z;
+    input.pointVelocityB[0]=b.x;input.pointVelocityB[1]=b.y;input.pointVelocityB[2]=b.z;
+    PlanckSynergy::ObserveOwnContact(input);
+}
 void PublishSynergyActor(Actor* actor);
 PlanckStatus ResolveSynergyEndpoint(PlanckToken,PlanckToken,const PlanckEndpoint&,PlanckEndpointVisitor,void*);
 void RetireSynergyGeometry(uintptr_t);
@@ -2194,19 +2214,25 @@ struct PhysicsListener :
                 // Both nonmoveable likely implies hand vs hand, or weapon vs hand, or weapon vs weapon
                 // We set those to keyframed_reporting and if we don't disable contact, it'll trigger haptics and such
                 evnt.m_contactPointProperties->m_flags |= hkpContactPointProperties::CONTACT_IS_DISABLED;
+                ForwardOwnItemCosmeticContact(evnt,true,true);
                 return;
             }
             else if (isAheld && isBheld) {
                 // 4. Held object vs held object
                 // Both are held objects - don't let them hit each other
                 // TODO: We could try to handle this properly (let them hit each other)
+                ForwardOwnItemCosmeticContact(evnt,false,true);
                 return;
             }
             else if (!isAheld && !isBheld) {
                 // 1. Hand/weapon vs hand/weapon (if not handled by above case)
                 // Only allow hits vs held objects. Still let the collision happen though.
+                ForwardOwnItemCosmeticContact(evnt,false,true);
                 return;
             }
+            // A held/equipped mixed pair still follows the legacy native path.
+            // Cosmetic evidence neither certifies nor changes its damage outcome.
+            ForwardOwnItemCosmeticContact(evnt,false,false);
         }
 
         // Possible cases remaining:
@@ -8753,6 +8779,9 @@ extern "C" {
             }
             else if (msg->type == SKSEMessagingInterface::kMessage_PostPostLoad) {
                 if(auto module=GetModuleHandleA("higgs_vr.dll")){
+                    const auto contactQuery=reinterpret_cast<HIGGS_QueryOwnContactNativeInterfaceFn>(GetProcAddress(module,"HIGGS_QueryOwnContactNativeInterface"));
+                    HIGGS_OwnContactNativeInterface contacts{};
+                    if(contactQuery&&contactQuery(1,sizeof(contacts),&contacts)==HIGGS_HAND_OK)PlanckSynergy::InstallOwnContactObserver(contacts);
                     const auto query=reinterpret_cast<HIGGS_QueryHandPartsNativeInterfaceFn>(GetProcAddress(module,"HIGGS_QueryHandPartsNativeInterface"));
                     HIGGS_HandPartsNativeInterface parts{};
                     if(query&&query(1,sizeof(parts),&parts)==HIGGS_HAND_OK)PlanckSynergy::InstallHandPartResolver(parts);

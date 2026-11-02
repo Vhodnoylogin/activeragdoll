@@ -10,6 +10,8 @@ This fork's intended direction follows the concept maintained only in Body Pouch
 
 The [native build procedure](docs/native-build-prerequisites.md) builds the complete DLL from external SDK inputs without deployment hooks and verifies its binding metadata. Native linking now succeeds; game qualification remains pending.
 
+The optional [own-item cosmetic contact bridge](docs/own-item-contacts.md) forwards exact paired point velocities to HIGGS-owned evidence/policies while preserving PLANCK's existing own-item response and hit paths. Feedback presentation and running-game qualification remain separate.
+
 This mod is also complicated.
 
 The additive [scoped NPC drive policy](docs/drive-api.md) lets consumers block pivot loosening for a specific actor and request bounded controller gains/body weights. PLANCK applies and restores those inputs around its existing driver call, with copied observations and explicit ownership conflicts; consumers do not need a second ragdoll actuator for these operations. It does not implement PPB's complete pose pipeline.
