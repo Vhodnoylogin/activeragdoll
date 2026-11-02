@@ -111,6 +111,12 @@ def main():
     project_path, = ROOT.glob("*.vcxproj")
     project = ET.parse(project_path).getroot()
     sources = [ROOT / x.attrib["Include"].replace("\\", "/") for x in project.findall(".//p:ClCompile[@Include]", NS)]
+    def source_pins():
+        values = {p.relative_to(ROOT).as_posix(): digest(p) for folder in ("src", "include", "tools")
+                  for p in (ROOT / folder).rglob("*") if p.is_file() and p.suffix in (".h", ".hpp", ".inl", ".cpp", ".c", ".py")}
+        values.update({p.relative_to(ROOT).as_posix(): digest(p) for p in (project_path, ROOT / "exports.def")})
+        return values
+    pins = source_pins()
     obj = out / "obj"
     obj.mkdir(exist_ok=True)
     flags = ["/nologo", "/std:c++20", "/EHsc", "/MT", "/O2", "/Zi", "/Gy", "/permissive", "/Zc:twoPhase-", "/DWIN32", "/DNDEBUG", "/DNOMINMAX", "/D_WINDOWS", "/D_USRDLL", "/D_ENABLE_EXTENDED_ALIGNED_STORAGE", "/FI" + str(ROOT / "tools/native_prefix.h")]
@@ -153,18 +159,23 @@ def main():
         commands.append({"command": argv, "exitCode": process.returncode})
         link_ok = process.returncode == 0
         print(process.stdout[-20000:], flush=True)
-    pins = {p.relative_to(ROOT).as_posix(): digest(p) for folder in ("src", "include", "tools") for p in (ROOT / folder).rglob("*") if p.is_file() and p.suffix in (".h", ".cpp", ".py")}
-    pins.update({p.relative_to(ROOT).as_posix():digest(p) for p in (project_path,ROOT/"exports.def")})
+    after_pins = source_pins()
+    changed_inputs = sorted(key for key in pins.keys() | after_pins.keys() if pins.get(key) != after_pins.get(key))
     support_manifests={}
     for library in args.support_library:
         support_manifest=library.resolve().parent/"manifest.json"
         if support_manifest.is_file():
             support_manifests[str(support_manifest)]=digest(support_manifest)
     manifest = {"project": name, "sourceSha256": pins, "sdkHeaderSha256":sdk_inputs,"havokHeaderSha256":havok_inputs,"sdkPrefixSha256": digest(sdk / "common/IPrefix.h"), "havokVersionSha256": digest(version), "havokCompatibilityOverlay": patches, "sdkAccessOnlyPatches": sdk_patches, "commands": commands, "failedSources": failures, "nativePluginBuilt": link_ok, "compileOnly": args.compile_only, "postBuildEventsInvoked": False, "gameStarts": 0, "supportSourceManifests":support_manifests,"supportLibraries": {str(p.resolve()): digest(p.resolve()) for p in args.support_library}}
+    manifest.update(sourceInputsStable=not changed_inputs, changedInputPaths=changed_inputs)
+    if changed_inputs:
+        manifest["nativePluginBuilt"] = False
+        manifest["sourceSha256AfterBuild"] = after_pins
+        print("Source inputs changed during compilation: " + ", ".join(changed_inputs), flush=True)
     if link_ok:
         manifest["artifact"] = {"path": str(artifact), "sha256": digest(artifact), "bytes": artifact.stat().st_size}
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    return 1 if failures or (not args.compile_only and not link_ok) else 0
+    return 1 if failures or changed_inputs or (not args.compile_only and not link_ok) else 0
 
 
 if __name__ == "__main__":

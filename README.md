@@ -27,8 +27,7 @@ The [regression fixture](tests/README.md) uses a fake engine; the separately lin
 with copied actor/body samples, validated endpoint descriptors, owned policies and
 removable callbacks, precommit physical-hit decisions, safe-phase cloned capsule geometry adoption and
 a separate scoped native endpoint bridge for HIGGS. Revision 001 is unchanged. The actual service and selected native adapters
-have standalone CPU fixtures; HIGGS constraint transport and native/game qualification
-remain outstanding. The branch merges upstream 0.8.2 at `aed524a`.
+have standalone CPU fixtures. HIGGS implements the scoped constraint transport, and both full native plugins build; running-game qualification remains outstanding. The branch merges upstream 0.8.2 at `aed524a`.
 
 A private [reset-only deferred cleanup fence](docs/deferred-cleanup.md) also prevents
 queued furniture/get-up collision cleanup from adopting a replacement graph after
