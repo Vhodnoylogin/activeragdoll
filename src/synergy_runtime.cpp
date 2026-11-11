@@ -17,6 +17,7 @@ constexpr size_t MaxClients=64, MaxResources=512, MaxBodies=256, MaxActors=512, 
 constexpr uint64_t EventMask=255;
 struct Client { std::string id; bool closing=false; };
 struct ActorState {
+    uint64_t observedAtNs=0;
     uintptr_t model=0;PlanckActorPhysics state{};std::vector<BodySample> bodies;
     PlanckDriveSnapshot drive{};std::vector<PlanckDriveBody> driveBodies;
 };
@@ -177,6 +178,20 @@ PlanckStatus CopyActorPhysics(PlanckToken owner,uint32_t actor,PlanckActorPhysic
     for(uint32_t i=0;i<*required;++i)if(!Sized(&bodies[i]))return PLANCK_INVALID;
     *output=it->second.state;
     for(uint32_t i=0;i<*required;++i)bodies[i]=it->second.bodies[i].state;
+    return PLANCK_OK;
+}
+PlanckStatus CopyActorSampleTime(PlanckToken owner, PlanckActorRef actor, uint64_t sample, uint64_t* observedAtNs) {
+    if (!observedAtNs) return PLANCK_INVALID;
+    *observedAtNs = 0;
+    if (!Valid(actor) || !sample) return PLANCK_INVALID;
+    auto& registry = State();
+    std::lock_guard lock(registry.lock);
+    if (auto status = ClientStatus(registry, owner); status != PLANCK_OK) return status;
+    const auto it = registry.actors.find(actor.handle);
+    if (registry.suspended || it == registry.actors.end() || !Same(it->second.state.actor, actor) ||
+        it->second.state.sample != sample) return PLANCK_STALE;
+    if (!it->second.observedAtNs) return PLANCK_NOT_FOUND;
+    *observedAtNs = it->second.observedAtNs;
     return PLANCK_OK;
 }
 PlanckStatus AcquireEndpoint(PlanckToken owner,const PlanckEndpointQuery* query,PlanckEndpoint* output) {
@@ -392,11 +407,11 @@ template<auto Fn> struct Boundary;
 template<class R,class... A,R(*Fn)(A...)> struct Boundary<Fn> {
     static R PLANCK_CALL Call(A... args) noexcept {try{return Fn(args...);}catch(...){return PLANCK_LIMIT;}}
 };
-PlanckSynergyAPI api={sizeof(PlanckSynergyAPI),2,15,
+PlanckSynergyAPI api={sizeof(PlanckSynergyAPI),2,15 | PLANCK_CAP_SAMPLE_TIME,
     Boundary<RegisterClient>::Call,Boundary<ReleaseClient>::Call,Boundary<Subscribe>::Call,Boundary<Unsubscribe>::Call,
     Boundary<CopyActorPhysics>::Call,Boundary<AcquireEndpoint>::Call,Boundary<ValidateEndpoint>::Call,
     Boundary<ReleaseLease>::Call,Boundary<RequestPolicy>::Call,Boundary<RegisterHitPolicy>::Call,Boundary<CopyHit>::Call,
-    Boundary<RequestGeometry>::Call,Boundary<GetResult>::Call,Boundary<CancelRequest>::Call};
+    Boundary<RequestGeometry>::Call,Boundary<GetResult>::Call,Boundary<CancelRequest>::Call,Boundary<CopyActorSampleTime>::Call};
 const PlanckPhysicalInteropAPI physicalAPI={sizeof(PlanckPhysicalInteropAPI),1,Boundary<WithEndpoint>::Call};
 const PlanckDriveAPI driveAPI={sizeof(PlanckDriveAPI),1,Boundary<RequestDrivePolicy>::Call,
     Boundary<CopyDrive>::Call,Boundary<CopyDrivePolicy>::Call};
@@ -616,7 +631,11 @@ PlanckStatus VisitResolvedEndpoint(PlanckToken owner,PlanckToken lease,uintptr_t
     return visitor(&copied,context);
 }
 
-void PublishActor(uint32_t handle,uintptr_t model,bool ragdolled,uint64_t frame,uint64_t tick,double time,const std::vector<BodySample>& bodies,DeferredEvents* deferred) {
+uint64_t MonotonicNowNs() {
+    using namespace std::chrono;
+    return static_cast<uint64_t>(duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count());
+}
+void PublishActor(uint32_t handle,uintptr_t model,bool ragdolled,uint64_t frame,uint64_t tick,double time,const std::vector<BodySample>& bodies,DeferredEvents* deferred,uint64_t observedAtNs) {
     if(!handle)return;
     if(!model||bodies.empty()||bodies.size()>MaxBodies){InvalidateActor(handle,deferred);return;}
     auto& r=State();std::lock_guard nativeGuard(r.nativeGate);std::vector<uint64_t> invalidated,cancelled,driveInvalidated;PlanckActorRef old{},current{};bool changed=false;
@@ -627,7 +646,7 @@ void PublishActor(uint32_t handle,uintptr_t model,bool ragdolled,uint64_t frame,
         auto it=r.actors.find(handle);
         bool replaced=it==r.actors.end()||it->second.model!=model||it->second.bodies.size()!=bodies.size();
         if(!replaced)for(size_t i=0;i<bodies.size();++i)if(it->second.bodies[i].identity!=bodies[i].identity||it->second.bodies[i].lineage!=bodies[i].lineage){replaced=true;break;}
-        ActorState next;next.model=model;next.bodies=bodies;
+        ActorState next;next.model=model;next.bodies=bodies;next.observedAtNs=observedAtNs;
         const auto sample=++r.sample;
         if(replaced) {
             changed=true;

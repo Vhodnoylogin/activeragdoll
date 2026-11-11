@@ -40,9 +40,10 @@ namespace PlanckSynergy {
     PlanckStatus VisitResolvedEndpoint(PlanckToken client,PlanckToken lease,
         uintptr_t modelIdentity,uintptr_t bodyIdentity,uintptr_t lineage,
         const PlanckNativeEndpoint&,PlanckEndpointVisitor,void*);
+    uint64_t MonotonicNowNs();
     void PublishActor(uint32_t handle, uintptr_t modelIdentity, bool ragdolled,
         uint64_t frame, uint64_t tick, double time, const std::vector<BodySample>& bodies,
-        DeferredEvents* deferred = nullptr);
+        DeferredEvents* deferred = nullptr, uint64_t observedAtNs = 0);
     void InvalidateActor(uint32_t handle, DeferredEvents* deferred = nullptr);
     void DispatchEvents(const DeferredEvents& deferred);
     void InvalidateBody(uintptr_t identity);

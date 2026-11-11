@@ -179,4 +179,22 @@ void InvalidationDuringPolicy(){
     assert(api->ReleaseClient(c)==PLANCK_OK);
 }
 
-int main(){Lifecycle();CoherentSnapshotsAndLoading();HitPolicies();Drainage();GeometryRequests();PhysicalBridge();InvalidationDuringPolicy();std::cout<<"PASS PLANCK production core, C consumer, lifecycle, coherent snapshots/loading, hit gates, geometry commitments, native endpoint bridge, cancellation interleavings and callback drainage\n";}
+void SampleClock() {
+    const PlanckToken owner = Client("sample.clock");
+    constexpr uint64_t captured = 702000000000ULL;
+    PublishActor(42, 999, false, 10, 20, 1., Bodies(), nullptr, captured);
+    const auto body = Copy(owner);
+    uint64_t ns = 0;
+    assert(api->capabilities & PLANCK_CAP_SAMPLE_TIME);
+    assert(api->CopyActorSampleTime(owner, body.body.actor, body.sample, &ns) == PLANCK_OK && ns == captured);
+    assert(api->CopyActorSampleTime(owner, body.body.actor, body.sample, &ns) == PLANCK_OK && ns == captured);
+    PublishActor(42, 999, false, 10, 21, 1., Bodies(), nullptr, captured + 1000000);
+    assert(api->CopyActorSampleTime(owner, body.body.actor, body.sample, &ns) == PLANCK_STALE && ns == 0);
+    const auto next = Copy(owner);
+    assert(api->CopyActorSampleTime(owner, next.body.actor, next.sample, &ns) == PLANCK_OK && ns == captured + 1000000);
+    assert(api->CopyActorSampleTime(0, next.body.actor, next.sample, &ns) == PLANCK_INVALID && ns == 0);
+    Reset();
+    assert(api->CopyActorSampleTime(owner, next.body.actor, next.sample, &ns) == PLANCK_STALE && ns == 0);
+    assert(api->ReleaseClient(owner) == PLANCK_OK);
+}
+int main(){SampleClock();Lifecycle();CoherentSnapshotsAndLoading();HitPolicies();Drainage();GeometryRequests();PhysicalBridge();InvalidationDuringPolicy();std::cout<<"PASS PLANCK production core, C consumer, lifecycle, coherent snapshots/loading, hit gates, geometry commitments, native endpoint bridge, cancellation interleavings and callback drainage\n";}

@@ -4443,6 +4443,7 @@ void PublishSynergyActor(Actor* actor)
             PlanckSynergy::InvalidateActor(handle,&events);
         } else {
             BSWriteLocker worldLock(&world->worldLock);
+            const auto observedAtNs = PlanckSynergy::MonotonicNowNs();
             std::vector<PlanckSynergy::BodySample> samples;
             for (UInt32 graphIndex=0; graphIndex<graphManager.ptr->graphs.size; ++graphIndex) {
                 BShkbAnimationGraph* graph=graphManager.ptr->graphs.GetData()[graphIndex].ptr;
@@ -4475,7 +4476,7 @@ void PublishSynergyActor(Actor* actor)
                 }
             }
             PlanckSynergy::PublishActor(handle,reinterpret_cast<uintptr_t>(actor->GetNiNode()),
-                Actor_IsInRagdollState(actor),*g_currentFrameCounter,g_synergyPhysicsTick.load(),g_currentFrameTime,samples,&events);
+                Actor_IsInRagdollState(actor),*g_currentFrameCounter,g_synergyPhysicsTick.load(),g_currentFrameTime,samples,&events,observedAtNs);
             PlanckSynergy::ProcessActorGeometry(handle,reinterpret_cast<uintptr_t>(actor->GetNiNode()),
                 samples,ApplySynergyCapsule,static_cast<bhkWorld*>(world),&events);
             PlanckSynergy::ProcessActorCompoundGeometry(handle,reinterpret_cast<uintptr_t>(actor->GetNiNode()),

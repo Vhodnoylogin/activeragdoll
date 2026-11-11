@@ -26,7 +26,7 @@ enum { PLANCK_PHASE_MAIN=1, PLANCK_PHASE_PRE_PHYSICS=2, PLANCK_PHASE_HIT=3,
 enum { PLANCK_ACTOR_CHANGED=1, PLANCK_ENDPOINT_INVALIDATED=2, PLANCK_HIT_CANDIDATE=4,
     PLANCK_HIT_COMMITTED=8, PLANCK_REQUEST_RESULT=16, PLANCK_RESET=32 };
 enum { PLANCK_CAP_ACTORS=1, PLANCK_CAP_ENDPOINTS=2, PLANCK_CAP_HIT_POLICY=4,
-    PLANCK_CAP_ACTOR_POLICY=8, PLANCK_CAP_CAPSULE_GEOMETRY=16 };
+    PLANCK_CAP_ACTOR_POLICY=8, PLANCK_CAP_CAPSULE_GEOMETRY=16, PLANCK_CAP_SAMPLE_TIME=32 };
 enum { PLANCK_HIT_MELEE=1, PLANCK_HIT_CLUTTER=2 };
 enum { PLANCK_HIT_PENDING=0, PLANCK_HIT_ALLOWED=1, PLANCK_HIT_DENIED=2,
     PLANCK_HIT_CANCELLED=3 };
@@ -113,6 +113,9 @@ typedef struct PlanckSynergyAPI {
     PlanckStatus (PLANCK_CALL *RequestActorGeometry)(PlanckToken,const PlanckGeometryRequest*,PlanckToken*);
     PlanckStatus (PLANCK_CALL *GetRequestResult)(PlanckToken,PlanckToken,PlanckRequestResult*);
     PlanckStatus (PLANCK_CALL *CancelRequest)(PlanckToken,PlanckToken);
+    /* Optional tail. Check size and PLANCK_CAP_SAMPLE_TIME before calling.
+     * QPC-based monotonic nanoseconds at body capture, for this exact sample. */
+    PlanckStatus (PLANCK_CALL *CopyActorSampleTime)(PlanckToken,PlanckActorRef,uint64_t sample,uint64_t* observedAtNs);
 } PlanckSynergyAPI;
 #ifdef __cplusplus
 }
