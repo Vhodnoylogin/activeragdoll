@@ -4450,7 +4450,7 @@ void PublishSynergyActor(Actor* actor)
                 hkbRagdollDriver* driver=graph ? graph->character.ragdollDriver : nullptr;
                 if (!driver || !driver->ragdoll || !GetActiveRagdollFromDriver(driver)) continue;
                 hkaRagdollInstance* ragdoll=driver->ragdoll;
-                if (ragdoll->getWorld()!=world->world.val()) continue;
+                if (!ragdoll->m_rigidBodies.getSize() || ragdoll->getWorld()!=world->world.val()) continue;
                 for (int i=0; i<ragdoll->m_rigidBodies.getSize(); ++i) {
                     hkpRigidBody* body=ragdoll->m_rigidBodies[i];
                     if (!body || body->getWorld()!=world->world.val()) continue;
@@ -4461,8 +4461,9 @@ void PublishSynergyActor(Actor* actor)
                     state.size=sizeof(state);
                     state.worldPosition=SynergyVector(HkVectorToNiPoint(body->getPosition()));
                     for (int j=0; j<4; ++j) state.worldRotation[j]=body->getRotation().m_vec(j);
-                    if (ragdoll->m_skeleton && i<ragdoll->m_skeleton->m_bones.getSize()) {
-                        const char* name=ragdoll->m_skeleton->m_bones[i].m_name.cString();
+                    const int boneIndex = ragdoll->getBoneIndexOfRigidBody(body);
+                    if (ragdoll->m_skeleton && boneIndex >= 0 && boneIndex < ragdoll->m_skeleton->m_bones.getSize()) {
+                        const char* name=ragdoll->m_skeleton->m_bones[boneIndex].m_name.cString();
                         if (name) strncpy_s(state.boneName,name,_TRUNCATE);
                     }
                     if (auto shape=DYNAMIC_CAST(body->getCollidable()->m_shape,hkpShape,hkpCapsuleShape)) {
@@ -4511,7 +4512,7 @@ PlanckStatus ResolveSynergyEndpoint(PlanckToken owner,PlanckToken lease,const Pl
         hkbRagdollDriver* driver=graph?graph->character.ragdollDriver:nullptr;
         if(!driver||!driver->ragdoll||!GetActiveRagdollFromDriver(driver))continue;
         hkaRagdollInstance* ragdoll=driver->ragdoll;
-        if(ragdoll->getWorld()!=world->world.val())continue;
+        if(!ragdoll->m_rigidBodies.getSize() || ragdoll->getWorld()!=world->world.val())continue;
         for(int i=0;i<ragdoll->m_rigidBodies.getSize();++i){
             hkpRigidBody* body=ragdoll->m_rigidBodies[i];
             if(!body||body->getWorld()!=world->world.val())continue;
@@ -8820,9 +8821,12 @@ extern "C" {
             }
             else if (msg->type == SKSEMessagingInterface::kMessage_PostLoadGame || msg->type == SKSEMessagingInterface::kMessage_NewGame) {
                 PlanckSynergy::SetSuspended(false);
-                bool loadSucceeded = msg->type == SKSEMessagingInterface::kMessage_NewGame || (bool)msg->data;
+                bool loadSucceeded = (bool)msg->data;
                 if (loadSucceeded) {
                     ResetObjects();
+                }
+                else if (msg->type == SKSEMessagingInterface::kMessage_NewGame) {
+                    PlanckSynergy::Reset();
                 }
             }
         }

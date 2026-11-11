@@ -1,6 +1,7 @@
 #include "synergy_runtime.h"
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cmath>
 #include <cstring>
 #include <deque>
@@ -17,7 +18,6 @@ constexpr size_t MaxClients=64, MaxResources=512, MaxBodies=256, MaxActors=512, 
 constexpr uint64_t EventMask=255;
 struct Client { std::string id; bool closing=false; };
 struct ActorState {
-    uint64_t observedAtNs=0;
     uintptr_t model=0;PlanckActorPhysics state{};std::vector<BodySample> bodies;
     PlanckDriveSnapshot drive{};std::vector<PlanckDriveBody> driveBodies;
 };
@@ -169,14 +169,17 @@ PlanckStatus Unsubscribe(PlanckToken owner,PlanckToken id) {
     r.resources.erase(id);return PLANCK_OK;
 }
 PlanckStatus CopyActorPhysics(PlanckToken owner,uint32_t actor,PlanckActorPhysics* output,PlanckBodyPhysics* bodies,uint32_t capacity,uint32_t* required) {
-    if(!Sized(output)||!required||(capacity&&!bodies))return PLANCK_INVALID;
+    constexpr size_t originalSize = offsetof(PlanckActorPhysics, observedAtNs);
+    if (!output || output->size < originalSize || !required || (capacity && !bodies)) return PLANCK_INVALID;
     auto& r=State();std::lock_guard guard(r.lock);auto status=ClientStatus(r,owner);if(status)return status;
     if(r.suspended)return PLANCK_STALE;
     auto it=r.actors.find(actor);if(it==r.actors.end())return PLANCK_NOT_FOUND;
     *required=static_cast<uint32_t>(it->second.bodies.size());
     if(capacity<*required)return PLANCK_BUFFER;
     for(uint32_t i=0;i<*required;++i)if(!Sized(&bodies[i]))return PLANCK_INVALID;
-    *output=it->second.state;
+    const auto bytes = output->size >= sizeof(*output) ? sizeof(*output) : originalSize;
+    std::memcpy(output, &it->second.state, bytes);
+    output->size = static_cast<uint32_t>(bytes);
     for(uint32_t i=0;i<*required;++i)bodies[i]=it->second.bodies[i].state;
     return PLANCK_OK;
 }
@@ -190,8 +193,8 @@ PlanckStatus CopyActorSampleTime(PlanckToken owner, PlanckActorRef actor, uint64
     const auto it = registry.actors.find(actor.handle);
     if (registry.suspended || it == registry.actors.end() || !Same(it->second.state.actor, actor) ||
         it->second.state.sample != sample) return PLANCK_STALE;
-    if (!it->second.observedAtNs) return PLANCK_NOT_FOUND;
-    *observedAtNs = it->second.observedAtNs;
+    if (!it->second.state.observedAtNs) return PLANCK_NOT_FOUND;
+    *observedAtNs = it->second.state.observedAtNs;
     return PLANCK_OK;
 }
 PlanckStatus AcquireEndpoint(PlanckToken owner,const PlanckEndpointQuery* query,PlanckEndpoint* output) {
@@ -646,7 +649,7 @@ void PublishActor(uint32_t handle,uintptr_t model,bool ragdolled,uint64_t frame,
         auto it=r.actors.find(handle);
         bool replaced=it==r.actors.end()||it->second.model!=model||it->second.bodies.size()!=bodies.size();
         if(!replaced)for(size_t i=0;i<bodies.size();++i)if(it->second.bodies[i].identity!=bodies[i].identity||it->second.bodies[i].lineage!=bodies[i].lineage){replaced=true;break;}
-        ActorState next;next.model=model;next.bodies=bodies;next.observedAtNs=observedAtNs;
+        ActorState next;next.model=model;next.bodies=bodies;
         const auto sample=++r.sample;
         if(replaced) {
             changed=true;
@@ -671,7 +674,7 @@ void PublishActor(uint32_t handle,uintptr_t model,bool ragdolled,uint64_t frame,
             }
         }
         for(auto& b:next.bodies){b.state.size=sizeof(b.state);b.state.sample=sample;b.state.boneName[95]=0;}
-        next.state={sizeof(PlanckActorPhysics),static_cast<uint32_t>(bodies.size()),current,sample,frame,tick,time,PLANCK_PHASE_MAIN,static_cast<uint32_t>(ragdolled)};
+        next.state={sizeof(PlanckActorPhysics),static_cast<uint32_t>(bodies.size()),current,sample,frame,tick,time,PLANCK_PHASE_MAIN,static_cast<uint32_t>(ragdolled),observedAtNs};
         r.actors[handle]=std::move(next);
     }
     DeferredEvents events;
@@ -739,12 +742,19 @@ PlanckHitSnapshot BeginHit(uint32_t kind,uint32_t target,uint32_t source,PlanckV
         // Do not evict an in-flight commitment; nested engine hits are bounded.
         if(r.hits.size()>=MaxHits){
             auto victim=std::find_if(r.hitOrder.begin(),r.hitOrder.end(),[&](auto id){return r.hits.at(id).outcome!=PLANCK_HIT_PENDING;});
-            if(victim==r.hitOrder.end()){hit.hitId=0;hit.outcome=PLANCK_HIT_CANCELLED;return hit;}
-            r.hits.erase(*victim);r.hitOrder.erase(victim);
+            if (victim == r.hitOrder.end()) {
+                hit.hitId = 0; // Observational history is full. Still evaluate policies.
+            } else {
+                r.hits.erase(*victim);
+                r.hitOrder.erase(victim);
+            }
         }
-        r.hits.emplace(hit.hitId,hit);r.hitOrder.push_back(hit.hitId);
+        if (hit.hitId) {
+            r.hits.emplace(hit.hitId,hit);
+            r.hitOrder.push_back(hit.hitId);
+        }
     }
-    Emit(PLANCK_HIT_CANDIDATE,hit.hitId,hit.target,PLANCK_PHASE_HIT);
+    if (hit.hitId) Emit(PLANCK_HIT_CANDIDATE,hit.hitId,hit.target,PLANCK_PHASE_HIT);
     const auto start=std::chrono::steady_clock::now();
     for(auto id:policies){
         if(std::chrono::steady_clock::now()-start>std::chrono::milliseconds(2)){denied=true;break;}
@@ -762,7 +772,7 @@ PlanckHitSnapshot BeginHit(uint32_t kind,uint32_t target,uint32_t source,PlanckV
     bool terminal=false;
     {
         std::lock_guard guard(r.lock);
-        if(r.epoch!=hit.epoch||(hit.target.actorGeneration&&!CurrentActor(r,hit.target))||!r.hits.contains(hit.hitId)){
+        if(r.epoch!=hit.epoch||(hit.target.actorGeneration&&!CurrentActor(r,hit.target))||(hit.hitId&&!r.hits.contains(hit.hitId))){
             hit.outcome=PLANCK_HIT_CANCELLED;
             // Target removal can occur during a policy callback. Retire the
             // stored pending snapshot too, even when the caller returns early.
@@ -771,8 +781,11 @@ PlanckHitSnapshot BeginHit(uint32_t kind,uint32_t target,uint32_t source,PlanckV
             if(stored!=r.hits.end()&&stored->second.outcome==PLANCK_HIT_PENDING){stored->second=hit;terminal=true;}
         } else {
             // Pending until FinishHit: observers cannot turn this into a commitment.
-            hit.outcome=denied?PLANCK_HIT_DENIED:PLANCK_HIT_PENDING;r.hits[hit.hitId]=hit;
-            terminal=denied;
+            hit.outcome=denied?PLANCK_HIT_DENIED:PLANCK_HIT_PENDING;
+            if (hit.hitId) {
+                r.hits[hit.hitId]=hit;
+                terminal=denied;
+            }
         }
     }
     if(terminal)Emit(PLANCK_HIT_COMMITTED,hit.hitId,hit.target,PLANCK_PHASE_HIT);

@@ -183,6 +183,14 @@ void SampleClock() {
     const PlanckToken owner = Client("sample.clock");
     constexpr uint64_t captured = 702000000000ULL;
     PublishActor(42, 999, false, 10, 20, 1., Bodies(), nullptr, captured);
+    PlanckActorPhysics actor{sizeof(actor)};
+    PlanckBodyPhysics bodies[2]{{sizeof(PlanckBodyPhysics)},{sizeof(PlanckBodyPhysics)}};
+    uint32_t count = 0;
+    assert(api->CopyActorPhysics(owner,42,&actor,bodies,2,&count)==PLANCK_OK);
+    assert(actor.size==sizeof(actor) && actor.observedAtNs==captured && bodies[1].sample==actor.sample);
+    actor.size=72; actor.observedAtNs=0x1234; // Old callers may have another object directly after the prefix.
+    assert(api->CopyActorPhysics(owner,42,&actor,bodies,2,&count)==PLANCK_OK);
+    assert(actor.size==72 && actor.observedAtNs==0x1234);
     const auto body = Copy(owner);
     uint64_t ns = 0;
     assert(api->capabilities & PLANCK_CAP_SAMPLE_TIME);
@@ -197,4 +205,27 @@ void SampleClock() {
     assert(api->CopyActorSampleTime(owner, next.body.actor, next.sample, &ns) == PLANCK_STALE && ns == 0);
     assert(api->ReleaseClient(owner) == PLANCK_OK);
 }
-int main(){SampleClock();Lifecycle();CoherentSnapshotsAndLoading();HitPolicies();Drainage();GeometryRequests();PhysicalBridge();InvalidationDuringPolicy();std::cout<<"PASS PLANCK production core, C consumer, lifecycle, coherent snapshots/loading, hit gates, geometry commitments, native endpoint bridge, cancellation interleavings and callback drainage\n";}
+void HitObservationCapacity() {
+    Reset();
+    const auto owner = Client("hit.observer");
+    Events events{owner};
+    assert(api->Subscribe(owner,PLANCK_HIT_CANDIDATE|PLANCK_HIT_FINALIZED,Event,&events,&events.sub)==PLANCK_OK);
+    uint64_t first = 0;
+    for (unsigned i=0; i<256; ++i) {
+        const auto hit = Hit();
+        assert(hit.hitId && hit.outcome==PLANCK_HIT_PENDING);
+        if (!i) first=hit.hitId;
+    }
+    const auto unrecorded = Hit();
+    assert(!unrecorded.hitId && unrecorded.outcome==PLANCK_HIT_PENDING && events.count==256);
+    PlanckHitPolicy policy{sizeof(policy),PLANCK_HIT_CLUTTER,{}};
+    PlanckToken lease=0;
+    unsigned vetoes=0;
+    assert(api->RegisterHitPolicy(owner,&policy,Deny,&vetoes,&lease)==PLANCK_OK);
+    const auto vetoed=Hit();
+    assert(!vetoed.hitId && vetoed.outcome==PLANCK_HIT_DENIED && vetoes==1 && events.count==256);
+    FinishHit(first,true);
+    assert(events.count==257 && Hit().hitId && events.count==259);
+    assert(api->ReleaseClient(owner)==PLANCK_OK);
+}
+int main(){SampleClock();Lifecycle();CoherentSnapshotsAndLoading();HitPolicies();HitObservationCapacity();Drainage();GeometryRequests();PhysicalBridge();InvalidationDuringPolicy();std::cout<<"PASS PLANCK production core, C consumer, lifecycle, coherent snapshots/loading, hit gates, geometry commitments, native endpoint bridge, cancellation interleavings and callback drainage\n";}
