@@ -24,7 +24,7 @@ enum { PLANCK_OK=0, PLANCK_INVALID=1, PLANCK_STALE=2, PLANCK_NOT_FOUND=3,
 enum { PLANCK_PHASE_MAIN=1, PLANCK_PHASE_PRE_PHYSICS=2, PLANCK_PHASE_HIT=3,
     PLANCK_PHASE_LIFECYCLE=4 };
 enum { PLANCK_ACTOR_CHANGED=1, PLANCK_ENDPOINT_INVALIDATED=2, PLANCK_HIT_CANDIDATE=4,
-    PLANCK_HIT_COMMITTED=8, PLANCK_REQUEST_RESULT=16, PLANCK_RESET=32 };
+    PLANCK_HIT_FINALIZED=8, PLANCK_HIT_COMMITTED=PLANCK_HIT_FINALIZED, PLANCK_REQUEST_RESULT=16, PLANCK_RESET=32 };
 enum { PLANCK_CAP_ACTORS=1, PLANCK_CAP_ENDPOINTS=2, PLANCK_CAP_HIT_POLICY=4,
     PLANCK_CAP_ACTOR_POLICY=8, PLANCK_CAP_CAPSULE_GEOMETRY=16, PLANCK_CAP_SAMPLE_TIME=32 };
 enum { PLANCK_HIT_MELEE=1, PLANCK_HIT_CLUTTER=2 };
@@ -45,6 +45,9 @@ typedef struct PlanckActorPhysics {
     uint32_t size, bodyCount; PlanckActorRef actor;
     uint64_t sample, mainFrame, physicsTick; double timeSeconds;
     uint32_t phase, ragdolled;
+    /* Optional output tail from CopyActorPhysics. Zero means no source clock.
+     * Check returned size before reading. QPC-based monotonic nanoseconds. */
+    uint64_t observedAtNs;
 } PlanckActorPhysics;
 typedef struct PlanckBodyPhysics {
     uint32_t size, capsule; PlanckBodyRef body; uint64_t sample, geometryRevision;
@@ -113,7 +116,8 @@ typedef struct PlanckSynergyAPI {
     PlanckStatus (PLANCK_CALL *RequestActorGeometry)(PlanckToken,const PlanckGeometryRequest*,PlanckToken*);
     PlanckStatus (PLANCK_CALL *GetRequestResult)(PlanckToken,PlanckToken,PlanckRequestResult*);
     PlanckStatus (PLANCK_CALL *CancelRequest)(PlanckToken,PlanckToken);
-    /* Optional tail. Check size and PLANCK_CAP_SAMPLE_TIME before calling.
+    /* Compatibility for clients with a 72-byte actor snapshot. Check table
+     * size and PLANCK_CAP_SAMPLE_TIME before calling.
      * QPC-based monotonic nanoseconds at body capture, for this exact sample. */
     PlanckStatus (PLANCK_CALL *CopyActorSampleTime)(PlanckToken,PlanckActorRef,uint64_t sample,uint64_t* observedAtNs);
 } PlanckSynergyAPI;

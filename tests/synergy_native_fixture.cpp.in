@@ -88,12 +88,19 @@ struct hkpRigidBody {
     NiPoint3 getLinearVelocity(){return velocity;}float getMassInv(){return .1f;}
 };
 struct bhkRigidBody {hkpRigidBody* hkBody;};
-struct BoneName {const char* cString()const{return "NPC Test";}};
+struct BoneName {const char* text="NPC Test";const char* cString()const{return text;}};
 struct Bone {BoneName m_name;};
 struct Skeleton {EngineArray<Bone> m_bones;};
 struct hkaRagdollInstance {
     hkpWorld* world=nullptr;Skeleton* m_skeleton=nullptr;EngineArray<hkpRigidBody*> m_rigidBodies;
-    hkpWorld* getWorld(){assert(graphHeld&&worldHeld);return world;}
+    EngineArray<int> boneToBody;
+    int getBoneIndexOfRigidBody(hkpRigidBody* body) const {
+        for (int i=0; i<boneToBody.getSize(); ++i) {
+            if (boneToBody[i]>=0 && m_rigidBodies[boneToBody[i]]==body) return i;
+        }
+        return -1;
+    }
+    hkpWorld* getWorld(){assert(graphHeld&&worldHeld&&!m_rigidBodies.empty());return world;}
 };
 struct hkbRagdollDriver {hkaRagdollInstance* ragdoll=nullptr;};
 struct BShkbAnimationGraph {struct Character {hkbRagdollDriver* ragdollDriver=nullptr;} character;};
@@ -177,8 +184,9 @@ int main(){
     hkpWorld world;bhkWorld bw{{&world}};TESObjectCELL cell{&bw};target.parentCell=&cell;
     auto* live=new hkpRigidBody;live->world=&world;
     hkpCapsuleShape shape;bhkShape sourceShape{{&shape}};shape.m_userData=reinterpret_cast<uintptr_t>(&sourceShape);live->collidable.m_shape=&shape;
-    Skeleton skeleton;skeleton.m_bones.push_back({});
+    Skeleton skeleton;skeleton.m_bones.push_back({{"unmapped"}});skeleton.m_bones.push_back({{"NPC Pelvis"}});
     hkaRagdollInstance ragdoll;ragdoll.world=&world;ragdoll.m_skeleton=&skeleton;ragdoll.m_rigidBodies.push_back(live);
+    ragdoll.boneToBody.push_back(-1);ragdoll.boneToBody.push_back(0);
     hkbRagdollDriver driver{&ragdoll};BShkbAnimationGraph graph;graph.character.ragdollDriver=&driver;fakeManager.graphs.data[0].ptr=&graph;
     unsigned published=0;PlanckToken subscription=0;
     auto observer=+[](const PlanckEvent* e,void* p){if(e->phase==PLANCK_PHASE_MAIN){assert(!graphHeld&&!worldHeld);++*static_cast<unsigned*>(p);}};
@@ -187,6 +195,7 @@ int main(){
     PlanckSynergy::InstallNativeEndpointResolver(ResolveSynergyEndpoint);
     PlanckActorPhysics a{sizeof(a)};PlanckBodyPhysics b{sizeof(b)};uint32_t needed=0;
     assert(api->CopyActorPhysics(client,42,&a,&b,1,&needed)==PLANCK_OK);
+    assert(std::strcmp(b.boneName,"NPC Pelvis")==0 && a.observedAtNs>0);
     PlanckEndpointQuery query{sizeof(query),0,b.body,{0,0,.2f},0};PlanckEndpoint endpoint{sizeof(endpoint)};
     assert(api->AcquireAttachmentEndpoint(client,&query,&endpoint)==PLANCK_OK);
     auto visit=+[](const PlanckNativeEndpoint* n,void* p)->PlanckStatus{
