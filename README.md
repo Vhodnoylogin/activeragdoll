@@ -47,3 +47,5 @@ public:
   }
 };
 ```
+
+The proposed [actor physics API](docs/synergy-api.md) uses the same SKSE message at PostPostLoad. A consumer can request a coherent copy of an active ragdoll, attach through a validated endpoint, propose a capsule fit, or apply a scoped drive or hit policy.
